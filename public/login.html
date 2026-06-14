@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ログイン | Fusen!</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 21c-3.8-3.4-6-6.7-6-9.9A6 6 0 0 1 18 11.1c0 3.2-2.2 6.5-6 9.9z' fill='%23FF6B35' stroke='%2321283B' stroke-width='2'/><circle cx='12' cy='11' r='2.3' fill='%23FFF6E9' stroke='%2321283B' stroke-width='1.5'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@700;800&family=M+PLUS+Rounded+1c:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/fsn-assets/style.css">
+</head>
+<body>
+<div class="login-stage">
+  <a class="logo" href="/"><span class="pin"></span>Fusen<em>!</em></a>
+
+  <form class="sticky-note" id="loginForm">
+    <h1 id="title">ようこそ!</h1>
+    <p id="desc">名前を入れてはじめましょう。パスワードは不要です。</p>
+    <input type="text" id="name" placeholder="例: 松本 和奏" maxlength="40" autofocus autocomplete="name">
+    <button class="btn btn-primary" type="submit" style="width:100%">はじめる →</button>
+  </form>
+
+  <div class="login-deco"><span></span><span></span><span></span><span></span></div>
+
+  <a href="/help" style="font-weight:800;font-size:13px;color:var(--ink)">アクセス方法がわからない方はこちら</a>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const q = new URLSearchParams(location.search);
+const isGuest = q.get("guest") === "1";
+const next = q.get("next") || "/";
+if (isGuest) {
+  document.getElementById("title").textContent = "レビューに招待されました";
+  document.getElementById("desc").textContent = "お名前を入れるだけで、サイトに直接コメントできます。";
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+document.getElementById("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = document.getElementById("name").value.trim();
+  if (!name) return toast("名前を入力してください");
+  const r = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, guest: isGuest }),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    return toast(d.error || "ログインに失敗しました");
+  }
+  location.href = next;
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,849 @@
+// ================================================
+// Fusen! オーバーレイ — プロキシ配信されたページに注入される注釈UI本体
+// ピンは「毎フレームDOM要素を再特定して現在位置に追従」する方式。
+// sticky/fixed要素や読み込みで動くレイアウトでもずれない。
+// ================================================
+(() => {
+  if (window.__FUSEN_LOADED__) return;
+  window.__FUSEN_LOADED__ = true;
+
+  const CFG = window.__FUSEN__;
+  if (!CFG) return;
+  const API = CFG.apiBase;
+
+  // アイコン(外部ファイルに依存せず内蔵 — 読み込み順・キャッシュの影響を受けない)
+  const ICON_PATHS = {
+    pin: '<path d="M12 21c-3.8-3.4-6-6.7-6-9.9A6 6 0 0 1 18 11.1c0 3.2-2.2 6.5-6 9.9z"/><circle cx="12" cy="11" r="2.3"/>',
+    bubble: '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H3.5l2-3.2A8.5 8.5 0 1 1 21 11.5z"/>',
+    eye: '<path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7.1-7.1L11.7 5.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/>',
+    flag: '<path d="M5 21V4"/><path d="M5 4h13l-2.5 4L18 12H5"/>',
+    home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/>',
+    x: '<path d="M6 6l12 12M18 6L6 18"/>',
+    check: '<path d="M5 13l4 4L19 7"/>',
+    undo: '<path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-7.4L3 8.6"/>',
+    pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    alert: '<path d="M12 3L1.8 20.2h20.4z"/><path d="M12 10v4"/><path d="M12 17.2v.6"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    checkCircle: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/>',
+  };
+  const I = (name, size = 16, sw = 2.4) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;flex:none;display:inline-block">${ICON_PATHS[name] || ""}</svg>`;
+
+  // ---------- ユーティリティ ----------
+  const esc = (s) =>
+    String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  const normalize = (u) => {
+    try {
+      const x = new URL(u);
+      x.hash = "";
+      return x.href;
+    } catch {
+      return u;
+    }
+  };
+  const PAGE = normalize(CFG.page);
+
+  const el = (html) => {
+    const t = document.createElement("template");
+    t.innerHTML = html.trim();
+    return t.content.firstElementChild;
+  };
+
+  const timeAgo = (iso) => {
+    const s = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (s < 60) return "たった今";
+    if (s < 3600) return `${Math.floor(s / 60)}分前`;
+    if (s < 86400) return `${Math.floor(s / 3600)}時間前`;
+    return `${Math.floor(s / 86400)}日前`;
+  };
+
+  async function apiCall(path, opt = {}) {
+    const r = await fetch(API + path, {
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      ...opt,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || "通信エラー");
+    return d;
+  }
+
+  // ---------- 状態 ----------
+  let mode = "browse"; // browse | comment
+  let comments = [];
+  let filter = "open";
+  let search = "";
+  let currentPageOnly = false; // サイドバー: 既定は全ページ集約(他ページのコメントに気づきやすくするため)
+  let popEl = null;
+  let popTrack = null; // 開いているポップオーバーの追従関数 () => {x,y,el}
+  let tempPinEl = null;
+  let tempAnchor = null;
+  let hoverHl = null; // コメントモードのホバー対象
+  const pinEls = new Map(); // comment.id -> pin要素
+  let openThreadId = null; // 現在開いているスレッドのコメントID(ポーリング更新時の判定に使う)
+  let lastSig = ""; // 直近に反映したコメント状態の署名(差分検知用)
+
+  const roots = () =>
+    comments
+      .filter((c) => !c.parent_id && normalize(c.page) === PAGE)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const repliesOf = (id) =>
+    comments.filter((c) => c.parent_id === id).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  // 全ページのルートコメント(サイドバーのページ別グループ表示用)
+  const rootsAllPages = () =>
+    comments.filter((c) => !c.parent_id).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  // ページURL → サイドバー見出し用の短いラベル
+  const pageLabel = (u) => {
+    try {
+      const x = new URL(u);
+      const p = (x.pathname || "/") + (x.search || "");
+      return p === "/" ? "トップページ" : p;
+    } catch {
+      return u;
+    }
+  };
+
+  // コメント集合の署名。id・状態・親の変化(=追加/解決/削除/返信)を検知する
+  const sigOf = (list) =>
+    list
+      .map((c) => `${c.id}:${c.status}:${c.parent_id || ""}`)
+      .sort()
+      .join("|");
+  const markSynced = () => {
+    lastSig = sigOf(comments);
+  };
+
+  // ---------- ルートUI構築 ----------
+  const root = el(`<div id="fsn-root" data-fsn></div>`);
+  const pinsLayer = el(`<div id="fsn-pins" data-fsn></div>`);
+  const hlBox = el(`<div id="fsn-hl" data-fsn></div>`);
+  const catcher = el(`<div id="fsn-catcher" data-fsn></div>`);
+  const hint = el(`<div class="fsn-hint" data-fsn>${I("pin", 14)} コメントしたい場所をクリック!(「見る」に戻すと操作できます)</div>`);
+  const toastEl = el(`<div class="fsn-toast" data-fsn></div>`);
+
+  const toolbar = el(`
+    <div class="fsn-toolbar" data-fsn>
+      <span class="fsn-tb-logo" title="Fusen!"></span>
+      <button class="fsn-tb-btn" id="fsn-tb-comments">${I("bubble", 15)} <span>コメント</span> <span class="fsn-tb-count" id="fsn-count">0</span></button>
+      <span class="fsn-tb-sep"></span>
+      <span class="fsn-mode">
+        <button id="fsn-mode-browse" class="fsn-on">${I("eye", 15)} 見る</button>
+        <button id="fsn-mode-comment">${I("pin", 15)} コメント</button>
+      </span>
+      <span class="fsn-tb-sep"></span>
+      <button class="fsn-tb-btn" id="fsn-tb-share">${I("link", 15)} 共有</button>
+      <button class="fsn-tb-btn fsn-cta" id="fsn-tb-review">${I("flag", 15)} レビュー完了</button>
+      <button class="fsn-tb-btn" id="fsn-tb-home" title="ダッシュボードへ">${I("home", 16)}</button>
+      <span class="fsn-avatar" title="${esc(CFG.user.name)}">${esc(CFG.user.name.slice(0, 1))}</span>
+    </div>`);
+
+  const sidebar = el(`
+    <div class="fsn-sidebar" data-fsn>
+      <div class="fsn-sb-head">
+        <h2>コメント <button class="fsn-btn fsn-plain" id="fsn-sb-close">${I("x", 14)}</button></h2>
+        <input id="fsn-sb-search" type="text" placeholder="コメントを検索…">
+        <div class="fsn-chips">
+          <button class="fsn-chip" data-f="all">すべて</button>
+          <button class="fsn-chip fsn-on" data-f="open">未解決</button>
+          <button class="fsn-chip" data-f="resolved">解決済み</button>
+        </div>
+        <label class="fsn-sb-toggle"><input type="checkbox" id="fsn-sb-thispage"> このページのコメントだけ表示</label>
+      </div>
+      <div class="fsn-sb-list" id="fsn-sb-list"></div>
+    </div>`);
+
+  function mount() {
+    document.body.appendChild(root);
+    root.appendChild(hlBox);
+    root.appendChild(pinsLayer);
+    root.appendChild(catcher);
+    root.appendChild(hint);
+    root.appendChild(toolbar);
+    root.appendChild(sidebar);
+    root.appendChild(toastEl);
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("fsn-show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("fsn-show"), 2600);
+  }
+
+  // ---------- セレクタ生成(近くの一意なIDを基点に安定化) ----------
+  function cssPath(elm) {
+    const uniqueId = (node) => {
+      if (!node.id) return null;
+      try {
+        return document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1 ? `#${CSS.escape(node.id)}` : null;
+      } catch {
+        return null;
+      }
+    };
+    const parts = [];
+    let cur = elm;
+    let base = "body";
+    while (cur && cur !== document.body && cur.nodeType === 1 && parts.length < 12) {
+      const idSel = uniqueId(cur);
+      if (idSel) {
+        base = idSel;
+        break;
+      }
+      const tag = cur.tagName.toLowerCase();
+      let nth = 1;
+      let sib = cur;
+      while ((sib = sib.previousElementSibling)) if (sib.tagName === cur.tagName) nth++;
+      parts.unshift(`${tag}:nth-of-type(${nth})`);
+      cur = cur.parentElement;
+    }
+    return parts.length ? `${base} > ${parts.join(" > ")}` : base;
+  }
+
+  // ---------- アンカー解決(ビューポート座標で返す) ----------
+  function resolveViewport(a) {
+    if (a.selector) {
+      try {
+        const elm = document.querySelector(a.selector);
+        if (elm) {
+          const r = elm.getBoundingClientRect();
+          if (r.width > 0 || r.height > 0) {
+            return { x: r.left + r.width * a.rx, y: r.top + r.height * a.ry, el: elm };
+          }
+        }
+      } catch {}
+    }
+    return { x: a.ax - scrollX, y: a.ay - scrollY, el: null }; // フォールバック: 保存時のページ絶対座標
+  }
+
+  // ---------- ハイライト ----------
+  function setHighlight(elm) {
+    if (!elm || !elm.isConnected) {
+      hlBox.style.display = "none";
+      return;
+    }
+    const r = elm.getBoundingClientRect();
+    hlBox.style.display = "block";
+    hlBox.style.left = r.left - 4 + "px";
+    hlBox.style.top = r.top - 4 + "px";
+    hlBox.style.width = r.width + 8 + "px";
+    hlBox.style.height = r.height + 8 + "px";
+  }
+
+  // ---------- 位置更新ループ(スクロール・レイアウト変化に追従) ----------
+  let rafQueued = false;
+  function updatePositions() {
+    rafQueued = false;
+    for (const [id, pin] of pinEls) {
+      const c = comments.find((x) => x.id === id);
+      if (!c) continue;
+      const p = resolveViewport(c);
+      pin.style.left = p.x + "px";
+      pin.style.top = p.y + "px";
+    }
+    if (tempPinEl && tempAnchor) {
+      const p = resolveViewport(tempAnchor);
+      tempPinEl.style.left = p.x + "px";
+      tempPinEl.style.top = p.y + "px";
+    }
+    if (popEl && popTrack) {
+      const p = popTrack();
+      placePop(popEl, p.x, p.y);
+      setHighlight(p.el);
+    } else if (hoverHl) {
+      setHighlight(hoverHl);
+    } else {
+      setHighlight(null);
+    }
+  }
+  function queueUpdate() {
+    if (rafQueued) return;
+    rafQueued = true;
+    requestAnimationFrame(updatePositions);
+  }
+
+  // スクロール(入れ子のスクロールコンテナ含む)・リサイズ・DOM変化で追従
+  addEventListener("scroll", queueUpdate, { capture: true, passive: true });
+  addEventListener("resize", queueUpdate);
+  const mo = new MutationObserver((muts) => {
+    if (muts.every((m) => m.target && m.target.closest && m.target.closest("[data-fsn]"))) return;
+    queueUpdate();
+    if (mode === "comment") sizeCatcher();
+  });
+
+  // ---------- ピン描画(データ変化時のみ再生成) ----------
+  function renderPins() {
+    pinsLayer.innerHTML = "";
+    pinEls.clear();
+    roots().forEach((c, i) => {
+      const pin = el(
+        `<div class="fsn-pin ${c.status === "resolved" ? "fsn-resolved" : ""}"><span>${i + 1}</span></div>`
+      );
+      pin.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openThread(c.id);
+      });
+      pin.addEventListener("mouseenter", () => {
+        if (!popEl) {
+          hoverHl = resolveViewport(c).el;
+          queueUpdate();
+        }
+      });
+      pin.addEventListener("mouseleave", () => {
+        hoverHl = null;
+        queueUpdate();
+      });
+      pinsLayer.appendChild(pin);
+      pinEls.set(c.id, pin);
+    });
+    const openCount = roots().filter((c) => c.status !== "resolved").length;
+    const cnt = toolbar.querySelector("#fsn-count");
+    if (cnt) cnt.textContent = String(openCount);
+    renderSidebar();
+    updatePositions();
+  }
+
+  // ---------- ポップオーバー ----------
+  function closePop() {
+    if (popEl) popEl.remove();
+    popEl = null;
+    popTrack = null;
+    if (tempPinEl) tempPinEl.remove();
+    tempPinEl = null;
+    tempAnchor = null;
+    openThreadId = null;
+    setHighlight(null);
+  }
+
+  function placePop(pop, x, y) {
+    const W = 320;
+    let left = x + 22;
+    if (left + W > innerWidth - 12) left = x - W - 22;
+    if (left < 8) left = 8;
+    const h = pop.offsetHeight || 200;
+    let top = y - 30;
+    if (top + h > innerHeight - 12) top = innerHeight - h - 12;
+    if (top < 8) top = 8;
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }
+
+  // 新規コメント入力
+  function openNewComment(anchor) {
+    closePop();
+    tempAnchor = anchor;
+    tempPinEl = el(`<div class="fsn-pin fsn-temp"><span>${I("plus", 14, 3)}</span></div>`);
+    pinsLayer.appendChild(tempPinEl);
+
+    popEl = el(`
+      <div class="fsn-pop" data-fsn>
+        <div class="fsn-pop-head">${I("pin", 14)} 新しいコメント <button class="fsn-x">${I("x", 14)}</button></div>
+        <div class="fsn-pop-foot" style="border-top:none">
+          <textarea placeholder="ここにコメントを書く…(例: この見出し、もう少し大きく!)"></textarea>
+          <div class="fsn-pop-actions">
+            <button class="fsn-btn" data-act="cancel">キャンセル</button>
+            <button class="fsn-btn fsn-primary" data-act="save">ペタッと貼る</button>
+          </div>
+        </div>
+      </div>`);
+    root.appendChild(popEl);
+    popTrack = () => resolveViewport(anchor);
+    updatePositions();
+    const ta = popEl.querySelector("textarea");
+    ta.focus();
+
+    popEl.querySelector(".fsn-x").addEventListener("click", closePop);
+    popEl.querySelector('[data-act="cancel"]').addEventListener("click", closePop);
+    popEl.querySelector('[data-act="save"]').addEventListener("click", async () => {
+      const body = ta.value.trim();
+      if (!body) return toast("コメントを入力してください");
+      try {
+        const d = await apiCall(`/api/canvases/${CFG.canvasId}/comments`, {
+          method: "POST",
+          body: JSON.stringify({ ...anchor, body, page: PAGE }),
+        });
+        comments.push(d.comment);
+        markSynced();
+        closePop();
+        renderPins();
+        toast("ペタッ!コメントを貼りました");
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  }
+
+  // スレッド表示
+  function openThread(id) {
+    closePop();
+    const c = comments.find((x) => x.id === id);
+    if (!c) return;
+    openThreadId = id;
+    const idx = roots().findIndex((x) => x.id === id) + 1;
+    const reps = repliesOf(id);
+    const mine = c.author === CFG.user.name;
+
+    const msgHtml = (m, reply) => `
+      <div class="fsn-msg ${reply ? "fsn-reply" : ""}">
+        <div class="fsn-who">${esc(m.author)} ${m.guest ? '<span class="fsn-guest-tag">ゲスト</span>' : ""} <span class="fsn-when">${timeAgo(m.created_at)}</span></div>
+        <div class="fsn-text">${esc(m.body)}</div>
+      </div>`;
+
+    popEl = el(`
+      <div class="fsn-pop" data-fsn>
+        <div class="fsn-pop-head">${I("bubble", 14)} コメント #${idx} ${c.status === "resolved" ? "(解決済み)" : ""} <button class="fsn-x">${I("x", 14)}</button></div>
+        <div class="fsn-pop-body">
+          ${msgHtml(c, false)}
+          ${reps.map((r) => msgHtml(r, true)).join("")}
+        </div>
+        <div class="fsn-pop-foot">
+          <textarea placeholder="返信を書く…"></textarea>
+          <div class="fsn-pop-actions">
+            ${mine ? '<button class="fsn-btn fsn-plain fsn-danger" data-act="del">削除</button>' : ""}
+            <button class="fsn-btn ${c.status === "resolved" ? "" : "fsn-teal"}" data-act="resolve">${c.status === "resolved" ? I("undo", 13) + " 再オープン" : I("check", 13) + " 解決にする"}</button>
+            <button class="fsn-btn fsn-primary" data-act="reply">返信</button>
+          </div>
+        </div>
+      </div>`);
+    root.appendChild(popEl);
+    popTrack = () => resolveViewport(c);
+    updatePositions();
+
+    popEl.querySelector(".fsn-x").addEventListener("click", closePop);
+    popEl.querySelector('[data-act="reply"]').addEventListener("click", async () => {
+      const ta = popEl.querySelector("textarea");
+      const body = ta.value.trim();
+      if (!body) return toast("返信を入力してください");
+      try {
+        const d = await apiCall(`/api/canvases/${CFG.canvasId}/comments`, {
+          method: "POST",
+          body: JSON.stringify({ body, page: PAGE, parent_id: id }),
+        });
+        comments.push(d.comment);
+        markSynced();
+        openThread(id);
+        renderPins();
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+    popEl.querySelector('[data-act="resolve"]').addEventListener("click", async () => {
+      try {
+        const next = c.status === "resolved" ? "active" : "resolved";
+        const d = await apiCall(`/api/comments/${id}`, { method: "PATCH", body: JSON.stringify({ status: next }) });
+        Object.assign(c, d.comment);
+        markSynced();
+        renderPins();
+        openThread(id);
+        if (next === "resolved") toast("解決済みにしました");
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+    const delBtn = popEl.querySelector('[data-act="del"]');
+    if (delBtn)
+      delBtn.addEventListener("click", async () => {
+        if (!confirm("このコメントを削除しますか?(返信も消えます)")) return;
+        try {
+          await apiCall(`/api/comments/${id}`, { method: "DELETE" });
+          comments = comments.filter((x) => x.id !== id && x.parent_id !== id);
+          markSynced();
+          closePop();
+          renderPins();
+          toast("削除しました");
+        } catch (e) {
+          toast(e.message);
+        }
+      });
+  }
+
+  // ---------- サイドバー(ページ別グループ表示) ----------
+  function renderSidebar() {
+    const list = sidebar.querySelector("#fsn-sb-list");
+    let items = currentPageOnly ? roots() : rootsAllPages();
+    if (filter === "open") items = items.filter((c) => c.status !== "resolved");
+    if (filter === "resolved") items = items.filter((c) => c.status === "resolved");
+    if (search) {
+      const q = search.toLowerCase();
+      items = items.filter((c) => c.body.toLowerCase().includes(q) || c.author.toLowerCase().includes(q));
+    }
+    if (!items.length) {
+      list.innerHTML = `<div class="fsn-sb-empty">${currentPageOnly ? "このページには" : "まだ"}<br>該当するコメントがありません</div>`;
+      return;
+    }
+
+    // 見出しの件数バッジ用: 絞り込みに関係なくページごとの真の「未解決/全体(解決済み込み)」を集計
+    const pageTotals = new Map();
+    for (const c of rootsAllPages()) {
+      const k = normalize(c.page);
+      const t = pageTotals.get(k) || { open: 0, total: 0 };
+      t.total++;
+      if (c.status !== "resolved") t.open++;
+      pageTotals.set(k, t);
+    }
+
+    // ページごとにグループ化(現在のページを先頭、以降は最初のコメント時刻順)
+    const groups = new Map();
+    for (const c of items) {
+      const key = normalize(c.page);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    const keys = [...groups.keys()].sort((a, b) => {
+      if (a === PAGE) return -1;
+      if (b === PAGE) return 1;
+      return groups.get(a)[0].created_at.localeCompare(groups.get(b)[0].created_at);
+    });
+
+    const pageRoots = roots(); // 現在ページのピン番号に対応させる
+    list.innerHTML = "";
+    for (const key of keys) {
+      const isCurrent = key === PAGE;
+      const arr = groups.get(key);
+      const tot = pageTotals.get(key) || { open: 0, total: arr.length };
+      list.appendChild(
+        el(`
+        <div class="fsn-pg-head ${isCurrent ? "fsn-pg-current" : ""}">
+          ${I("home", 12)} <span class="fsn-pg-name" title="${esc(arr[0].page)}">${esc(pageLabel(arr[0].page))}</span>
+          ${isCurrent ? '<span class="fsn-pg-tag">今見てるページ</span>' : ""}
+          <span class="fsn-pg-count" title="未解決 ${tot.open} / 全 ${tot.total}(解決済み含む)">${tot.open}/${tot.total}</span>
+        </div>`)
+      );
+      arr.forEach((c) => {
+        const reps = repliesOf(c.id).length;
+        const num = isCurrent ? pageRoots.findIndex((x) => x.id === c.id) + 1 : 0;
+        const item = el(`
+          <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
+            <div class="fsn-row1">
+              <span class="fsn-sb-num">${num ? num : I("pin", 11, 2.6)}</span>
+              <strong style="font-size:12.5px">${esc(c.author)}</strong>
+              <span class="fsn-sub">${timeAgo(c.created_at)}</span>
+            </div>
+            <div class="fsn-prev">${esc(c.body)}</div>
+            <div class="fsn-sub">${reps ? `返信 ${reps}件` : ""}${isCurrent ? "" : (reps ? "  ·  " : "") + "クリックで移動"}</div>
+          </div>`);
+        item.addEventListener("click", () => openFromSidebar(c));
+        list.appendChild(item);
+      });
+    }
+  }
+
+  // サイドバー項目クリック: 同じページなら開く、別ページならそのページへ移動して開く
+  function openFromSidebar(c) {
+    if (normalize(c.page) === PAGE) {
+      const p = resolveViewport(c);
+      window.scrollTo({ top: Math.max(0, scrollY + p.y - innerHeight / 3), behavior: "smooth" });
+      setTimeout(() => openThread(c.id), 400);
+    } else {
+      try {
+        const u = new URL(c.page);
+        location.href = `${API}/p/${CFG.canvasId}${u.pathname}${u.search}#fsn=${encodeURIComponent(c.id)}`;
+      } catch {
+        toast("このコメントのページを開けませんでした");
+      }
+    }
+  }
+
+  // ---------- レビュー(承認)モーダル ----------
+  async function openReviewModal() {
+    closePop();
+    let verdict = null;
+    let detail = { reviews: [] };
+    try {
+      detail = await apiCall(`/api/canvases/${CFG.canvasId}`);
+    } catch {}
+    const openCount = roots().filter((c) => c.status !== "resolved").length;
+
+    const bg = el(`
+      <div class="fsn-modal-bg" data-fsn>
+        <div class="fsn-modal">
+          <h2>${I("flag", 18)} レビューを完了する</h2>
+          ${openCount ? `<p style="margin:0 0 12px;font-size:13px;font-weight:700;color:#ff4f9a">${I("alert", 13)} 未解決のコメントが ${openCount} 件あります</p>` : ""}
+          <div class="fsn-verdicts">
+            <div class="fsn-verdict" data-v="approved">${I("checkCircle", 15)} 承認する</div>
+            <div class="fsn-verdict" data-v="changes_requested">${I("pen", 15)} 修正を依頼</div>
+          </div>
+          <textarea placeholder="ひとことコメント(任意)" style="width:100%;font-family:inherit;font-size:13.5px;border:2.5px solid #21283b;border-radius:10px;background:#fff6e9;padding:8px 10px;min-height:64px;outline:none"></textarea>
+          <div class="fsn-pop-actions" style="margin-top:12px">
+            <button class="fsn-btn" data-act="close">閉じる</button>
+            <button class="fsn-btn fsn-primary" data-act="submit">送信する</button>
+          </div>
+          <div class="fsn-history">
+            <h3>これまでのレビュー</h3>
+            ${
+              detail.reviews.length
+                ? detail.reviews
+                    .slice()
+                    .reverse()
+                    .map(
+                      (r) => `
+              <div class="fsn-h-item">
+                <span class="fsn-h-badge ${r.verdict === "approved" ? "ok" : "ng"}">${r.verdict === "approved" ? "承認" : "修正依頼"}</span>
+                <span><strong>${esc(r.author)}</strong> ${r.comment ? "「" + esc(r.comment) + "」" : ""} <span style="color:#8a90a3">${timeAgo(r.created_at)}</span></span>
+              </div>`
+                    )
+                    .join("")
+                : `<div style="font-size:12.5px;color:#8a90a3;font-weight:700">まだレビューはありません</div>`
+            }
+          </div>
+        </div>
+      </div>`);
+    root.appendChild(bg);
+
+    bg.addEventListener("click", (e) => {
+      if (e.target === bg) bg.remove();
+    });
+    bg.querySelector('[data-act="close"]').addEventListener("click", () => bg.remove());
+    bg.querySelectorAll(".fsn-verdict").forEach((v) =>
+      v.addEventListener("click", () => {
+        verdict = v.dataset.v;
+        bg.querySelectorAll(".fsn-verdict").forEach((x) => x.classList.remove("fsn-sel-ok", "fsn-sel-ng"));
+        v.classList.add(verdict === "approved" ? "fsn-sel-ok" : "fsn-sel-ng");
+      })
+    );
+    bg.querySelector('[data-act="submit"]').addEventListener("click", async () => {
+      if (!verdict) return toast("「承認する」か「修正を依頼」を選んでください");
+      try {
+        await apiCall(`/api/canvases/${CFG.canvasId}/reviews`, {
+          method: "POST",
+          body: JSON.stringify({ verdict, comment: bg.querySelector("textarea").value }),
+        });
+        bg.remove();
+        celebrate(verdict);
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  }
+
+  // 送信後のフィードバック画面(承認時はダッシュボードへ自動帰還)
+  function celebrate(verdict) {
+    const ok = verdict === "approved";
+    const goHome = ok && !CFG.user.guest;
+    const bg = el(`
+      <div class="fsn-modal-bg" data-fsn>
+        <div class="fsn-modal fsn-celebrate">
+          <div class="fsn-celebrate-icon ${ok ? "fsn-c-ok" : "fsn-c-ng"}">${I(ok ? "checkCircle" : "pen", 46, 2)}</div>
+          <h2 style="text-align:center">${ok ? "承認しました!" : "修正依頼を送りました"}</h2>
+          <p style="text-align:center;margin:0;font-size:13.5px;font-weight:700;color:#5a6175">
+            ${ok ? "このキャンバスのレビューは完了です。おつかれさまでした!" : "コメントをもとに修正をお願いしましょう。"}
+          </p>
+          ${goHome ? `<p style="text-align:center;margin:12px 0 0;font-size:12px;font-weight:700;color:#8a90a3">ダッシュボードに戻ります…</p>` : `<div style="text-align:center;margin-top:14px"><button class="fsn-btn" data-act="close">閉じる</button></div>`}
+        </div>
+      </div>`);
+    root.appendChild(bg);
+    const closeBtn = bg.querySelector('[data-act="close"]');
+    if (closeBtn) closeBtn.addEventListener("click", () => bg.remove());
+    if (goHome) setTimeout(() => (location.href = API + "/"), 1800);
+    else if (!ok) setTimeout(() => bg.isConnected && bg.remove(), 2500);
+  }
+
+  // ---------- モード切替 ----------
+  function sizeCatcher() {
+    catcher.style.height = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight) + "px";
+  }
+  function setMode(m) {
+    mode = m;
+    toolbar.querySelector("#fsn-mode-browse").classList.toggle("fsn-on", m === "browse");
+    toolbar.querySelector("#fsn-mode-comment").classList.toggle("fsn-on", m === "comment");
+    hint.style.display = m === "comment" ? "block" : "none";
+    if (m === "comment") {
+      catcher.style.display = "block";
+      sizeCatcher();
+    } else {
+      catcher.style.display = "none";
+      hoverHl = null;
+      closePop();
+      queueUpdate();
+    }
+  }
+
+  // 実要素の取得(自前UIを一瞬すり抜けさせる)
+  function elementAt(cx, cy) {
+    catcher.style.pointerEvents = "none";
+    const t = document.elementFromPoint(cx, cy);
+    catcher.style.pointerEvents = "auto";
+    if (!t || (t.closest && t.closest("[data-fsn]"))) return null;
+    return t;
+  }
+
+  // コメントモード: ホバーで対象要素をハイライト
+  let hoverThrottle = 0;
+  catcher.addEventListener("mousemove", (e) => {
+    const now = Date.now();
+    if (now - hoverThrottle < 60) return;
+    hoverThrottle = now;
+    if (popEl) return;
+    hoverHl = elementAt(e.clientX, e.clientY);
+    queueUpdate();
+  });
+  catcher.addEventListener("mouseleave", () => {
+    hoverHl = null;
+    queueUpdate();
+  });
+
+  catcher.addEventListener("click", (e) => {
+    const target = elementAt(e.clientX, e.clientY);
+    if (!target) return;
+    const r = target.getBoundingClientRect();
+    const anchor = {
+      selector: cssPath(target),
+      rx: r.width ? (e.clientX - r.left) / r.width : 0,
+      ry: r.height ? (e.clientY - r.top) / r.height : 0,
+      ax: scrollX + e.clientX,
+      ay: scrollY + e.clientY,
+    };
+    hoverHl = null;
+    openNewComment(anchor);
+  });
+
+  // ---------- ブラウズモードのリンク制御 ----------
+  // ・対象サイトへの絶対リンク → プロキシ表示URLに変換
+  // ・相対リンク(=自オリジン宛になる) → そのまま通す(サーバーのフォールバック中継が処理)
+  // ・外部サイト → 新しいタブで素のまま開く
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (e.target.closest && e.target.closest("[data-fsn]")) return;
+      const a = e.target.closest ? e.target.closest("a[href]") : null;
+      if (!a) return;
+      let href;
+      try {
+        href = new URL(a.getAttribute("href"), location.href);
+      } catch {
+        return;
+      }
+      if (!/^https?:$/.test(href.protocol)) return;
+
+      // 相対リンク等で自オリジン宛になったものは、サーバー側中継に任せる
+      if (href.host === location.host) return;
+
+      const sameSite = href.hostname === CFG.canvasHost;
+      e.preventDefault();
+      e.stopPropagation();
+      if (sameSite) {
+        location.href = `${API}/p/${CFG.canvasId}${href.pathname}${href.search}`;
+      } else {
+        window.open(href.href, "_blank");
+        toast("対象サイトの外側のリンクなので新しいタブで開きました");
+      }
+    },
+    true
+  );
+  // フォーム送信はサーバーのフォールバック中継がそのまま対象サイトへ届けるため、横取りしない
+
+  // ---------- ツールバー操作 ----------
+  toolbar.querySelector("#fsn-mode-browse").addEventListener("click", () => setMode("browse"));
+  toolbar.querySelector("#fsn-mode-comment").addEventListener("click", () => setMode("comment"));
+  toolbar.querySelector("#fsn-tb-comments").addEventListener("click", () => sidebar.classList.toggle("fsn-open"));
+  sidebar.querySelector("#fsn-sb-close").addEventListener("click", () => sidebar.classList.remove("fsn-open"));
+  sidebar.querySelectorAll(".fsn-chip").forEach((ch) =>
+    ch.addEventListener("click", () => {
+      sidebar.querySelectorAll(".fsn-chip").forEach((x) => x.classList.remove("fsn-on"));
+      ch.classList.add("fsn-on");
+      filter = ch.dataset.f;
+      renderSidebar();
+    })
+  );
+  sidebar.querySelector("#fsn-sb-search").addEventListener("input", (e) => {
+    search = e.target.value.trim();
+    renderSidebar();
+  });
+  sidebar.querySelector("#fsn-sb-thispage").addEventListener("change", (e) => {
+    currentPageOnly = e.target.checked;
+    renderSidebar();
+  });
+  toolbar.querySelector("#fsn-tb-share").addEventListener("click", async () => {
+    try {
+      const d = await apiCall(`/api/canvases/${CFG.canvasId}`);
+      await navigator.clipboard.writeText(d.share_url);
+      toast("共有リンクをコピーしました(ログイン不要でコメントできます)");
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+  toolbar.querySelector("#fsn-tb-review").addEventListener("click", openReviewModal);
+  const homeBtn = toolbar.querySelector("#fsn-tb-home");
+  if (homeBtn) homeBtn.addEventListener("click", () => (location.href = API + "/"));
+
+  // Escで閉じる
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closePop();
+      sidebar.classList.remove("fsn-open");
+    }
+  });
+
+  // ---------- 簡易リアルタイム同期(ポーリング) ----------
+  // 数秒ごとにサーバーからコメントを取り直し、他メンバーの追加・解決・削除を自動反映する。
+  // サーバー1台 + data/db.json の現構成のまま動作し、外部DBやWebSocketは不要。
+  // 入力中(新規コメント作成中・返信記入中)は反映を次回に回し、編集内容を壊さない。
+  async function poll() {
+    if (document.hidden) return; // 非表示タブでは通信しない
+    if (tempPinEl) return; // 新規コメント入力中はピン再描画で消えるため次回へ
+    let d;
+    try {
+      d = await apiCall(`/api/canvases/${CFG.canvasId}/comments`);
+    } catch {
+      return; // 一時的な通信失敗は無視(次回再試行)
+    }
+    const sig = sigOf(d.comments);
+    if (sig === lastSig) return; // 変化なし
+    lastSig = sig;
+    comments = d.comments;
+    renderPins(); // ポップオーバーはrootに付くため再描画で消えない
+    if (openThreadId) {
+      const still = comments.find((x) => x.id === openThreadId);
+      const ta = popEl && popEl.querySelector("textarea");
+      const typing = ta && ta.value.trim().length > 0;
+      if (!still) {
+        closePop();
+        toast("このコメントは他のメンバーが削除しました");
+      } else if (!typing) {
+        openThread(openThreadId); // 新着返信・解決状態を反映(返信入力中は触らない)
+      }
+    }
+  }
+
+  // 別ページから「#fsn=<id>」付きで来たとき、そのコメントへスクロールして開く
+  function openByHash() {
+    const m = location.hash.match(/fsn=([^&]+)/);
+    if (!m) return;
+    const id = decodeURIComponent(m[1]);
+    try {
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch {}
+    const c = comments.find((x) => x.id === id);
+    if (!c || normalize(c.page) !== PAGE) return;
+    // 画像読み込み等でレイアウトが定まるのを待ってから移動
+    setTimeout(() => {
+      const p = resolveViewport(c);
+      window.scrollTo({ top: Math.max(0, scrollY + p.y - innerHeight / 3), behavior: "smooth" });
+      setTimeout(() => openThread(c.id), 500);
+    }, 700);
+  }
+
+  // ---------- 起動 ----------
+  async function init() {
+    mount();
+    try {
+      const d = await apiCall(`/api/canvases/${CFG.canvasId}/comments`);
+      comments = d.comments;
+      markSynced();
+    } catch (e) {
+      toast(e.message);
+    }
+    renderPins();
+    openByHash();
+    mo.observe(document.body, { childList: true, subtree: true, attributes: false });
+    // 画像読み込み等でレイアウトが動くため遅延更新 + 低頻度の保険更新
+    setTimeout(queueUpdate, 1500);
+    setInterval(queueUpdate, 2000);
+    setInterval(poll, 3000); // 他メンバーのコメントを取り込む(簡易リアルタイム同期)
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
