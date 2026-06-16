@@ -4,12 +4,19 @@
   "private": true,
   "type": "module",
   "description": "社内向けWebサイトレビューツール — ライブサイトにピン留めコメント",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "dependencies": {
     "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.100.0"
   }
 }
