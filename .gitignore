@@ -2,9 +2,10 @@ node_modules/
 data/
 .DS_Store
 
-# wrangler files
-.wrangler
+# Cloudflare / wrangler
+.wrangler/
 .dev.vars*
 !.dev.vars.example
 .env*
 !.env.example
+seed.sql

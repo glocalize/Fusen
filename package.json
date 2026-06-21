@@ -11,12 +11,21 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "deploy": "wrangler deploy",
-    "preview": "wrangler dev"
+    "preview": "wrangler dev",
+    "cf:dev": "wrangler dev",
+    "cf:deploy": "wrangler deploy",
+    "cf:seed:gen": "node scripts/migrate-json-to-d1.mjs",
+    "cf:migrate:local": "wrangler d1 migrations apply fusen-db --local",
+    "cf:migrate:remote": "wrangler d1 migrations apply fusen-db --remote",
+    "cf:seed:local": "wrangler d1 execute fusen-db --local --file=seed.sql",
+    "cf:seed:remote": "wrangler d1 execute fusen-db --remote --file=seed.sql",
+    "test:d1": "node --experimental-sqlite scripts/test-d1.mjs"
   },
   "dependencies": {
-    "express": "^4.19.0"
+    "express": "^4.19.0",
+    "hono": "^4.6.0"
   },
   "devDependencies": {
-    "wrangler": "^4.100.0"
+    "wrangler": "^4.103.0"
   }
 }
