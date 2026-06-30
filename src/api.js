@@ -3,6 +3,7 @@
 import { Hono } from "hono";
 import * as db from "../lib/db-d1.js";
 import { getUser, userCookie, browserHeaders, originOf } from "../lib/util-workers.js";
+import { basicAuthHeader } from "./proxy.js";
 
 export const api = new Hono();
 
@@ -52,9 +53,12 @@ api.post("/check-url", requireUser, async (c) => {
     return c.json({ error: "URLの形式が正しくありません" }, 400);
   }
   try {
+    const headers = browserHeaders(c.req.raw);
+    const ba = basicAuthHeader(c.env, target.hostname);
+    if (ba) headers["authorization"] = ba;
     const r = await fetch(target.href, {
       redirect: "follow",
-      headers: browserHeaders(c.req.raw),
+      headers,
       signal: AbortSignal.timeout(12000),
     });
     const blocked = [401, 403, 406, 429, 503].includes(r.status);

@@ -8,6 +8,24 @@ export function isAllowed(target, canvasHost) {
   return target.hostname === canvasHost || target.hostname.endsWith("." + canvasHost);
 }
 
+// Basic 認証付きステージング対応: 指定ホストにだけ Authorization: Basic を付ける。
+// 資格情報は Cloudflare secret(env.PROXY_BASIC_AUTH = "ユーザー名:パスワード")で管理し、
+// env.PROXY_BASIC_AUTH_HOSTS(カンマ区切りのホスト名)に載るホストにのみ送る(他サイトへ漏らさない)。
+export function basicAuthHeader(env, hostname) {
+  const cred = env && env.PROXY_BASIC_AUTH;
+  if (!cred) return null;
+  const hosts = String((env && env.PROXY_BASIC_AUTH_HOSTS) || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!hosts.includes(String(hostname).toLowerCase())) return null;
+  try {
+    return "Basic " + btoa(cred);
+  } catch {
+    return null;
+  }
+}
+
 // HTML にオーバーレイ(注釈UI)を注入する
 export function injectOverlay(html, { canvas, finalUrl, appOrigin, user }) {
   // CSP メタタグを除去(注入スクリプトのブロックを防ぐ)
@@ -104,6 +122,8 @@ export async function proxyPath(c) {
     const headers = browserHeaders(c.req.raw);
     const ct = c.req.header("content-type");
     if (ct) headers["content-type"] = ct;
+    const ba = basicAuthHeader(c.env, target.hostname);
+    if (ba) headers["authorization"] = ba;
     const init = { method, headers, redirect: "follow", signal: AbortSignal.timeout(20000) };
     if (!["GET", "HEAD"].includes(method)) init.body = await c.req.raw.arrayBuffer();
     upstream = await fetch(target.href, init);
@@ -194,6 +214,8 @@ export async function relayFallback(c) {
     headers["sec-fetch-dest"] = "empty";
     headers["sec-fetch-mode"] = "cors";
     headers["sec-fetch-site"] = "same-origin";
+    const ba = basicAuthHeader(c.env, target.hostname);
+    if (ba) headers["authorization"] = ba;
     const init = { method: c.req.method, headers, redirect: "follow", signal: AbortSignal.timeout(20000) };
     if (!["GET", "HEAD"].includes(c.req.method)) init.body = await c.req.raw.arrayBuffer();
     const upstream = await fetch(target.href, init);

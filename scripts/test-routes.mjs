@@ -4,6 +4,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import app from "../src/index.js";
+import { basicAuthHeader } from "../src/proxy.js";
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -39,10 +40,14 @@ const ASSETS = {
   fetch: async (req) => new Response(`<!doctype html><html><body>ASSET ${new URL(req.url).pathname}</body></html>`, { headers: { "content-type": "text/html" } }),
 };
 
-// 上流サイトのモック(check-url / proxy / relay 用)。常に HTML 200。
-globalThis.fetch = async () => new Response("<html><head></head><body><h1>Hello</h1></body></html>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+// 上流サイトのモック(check-url / proxy / relay 用)。常に HTML 200。受け取った headers を記録。
+let lastFetch = null;
+globalThis.fetch = async (url, init) => {
+  lastFetch = { url: String(url), headers: (init && init.headers) || {} };
+  return new Response("<html><head></head><body><h1>Hello</h1></body></html>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+};
 
-const env = { DB: d1(sq), ASSETS };
+const env = { DB: d1(sq), ASSETS, PROXY_BASIC_AUTH: "revuser:revpass", PROXY_BASIC_AUTH_HOSTS: "example.com" };
 const req = (path, init = {}) => app.request(path, init, env);
 const J = (obj) => ({ headers: { "content-type": "application/json" }, method: "POST", body: JSON.stringify(obj) });
 
@@ -148,6 +153,7 @@ r = await req(`/p/${cid}/`, auth({ accept: "text/html" }));
 const html = await r.text();
 assert(r.status === 200 && html.includes("__FUSEN__") && html.includes("fusen-overlay.js"), "プロキシHTMLにオーバーレイ注入");
 assert((r.headers.get("set-cookie") || "").includes(`fsn_canvas=${cid}`), "fsn_canvas クッキー付与");
+assert(lastFetch && lastFetch.headers.authorization === "Basic " + btoa("revuser:revpass"), "Basic認証ヘッダが対象ホスト(example.com)へ付与される");
 
 // 17) /c/:id, /s/:token
 r = await req(`/c/${cid}`, auth());
@@ -158,6 +164,11 @@ assert(r.status === 302 && r.headers.get("location") === `/p/${cid}`, "/s/:token
 // 18) フォールバック中継: ルート絶対パスのHTML GET → /p/:id へ(fsn_canvas 利用)
 r = await req("/some/app/route", { headers: { Cookie: `${cookie}; fsn_canvas=${cid}`, accept: "text/html" } });
 assert(r.status === 302 && (r.headers.get("location") || "") === `/p/${cid}/some/app/route`, "中継: HTML GET はプロキシ表示へ");
+
+// Basic認証ヘルパー単体
+assert(basicAuthHeader({ PROXY_BASIC_AUTH: "u:p", PROXY_BASIC_AUTH_HOSTS: "example.com" }, "example.com") === "Basic " + btoa("u:p"), "basicAuthHeader: 対象ホストは付与");
+assert(basicAuthHeader({ PROXY_BASIC_AUTH: "u:p", PROXY_BASIC_AUTH_HOSTS: "example.com" }, "evil.com") === null, "basicAuthHeader: 対象外ホストは付与しない");
+assert(basicAuthHeader({ PROXY_BASIC_AUTH_HOSTS: "example.com" }, "example.com") === null, "basicAuthHeader: 資格情報なしは付与しない");
 
 console.log(`\n結果: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
