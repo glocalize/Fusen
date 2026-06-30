@@ -4,7 +4,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import app from "../src/index.js";
-import { basicAuthHeader } from "../src/proxy.js";
+import { basicAuthHeader, isSpaHost } from "../src/proxy.js";
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -47,7 +47,7 @@ globalThis.fetch = async (url, init) => {
   return new Response("<html><head></head><body><h1>Hello</h1></body></html>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 };
 
-const env = { DB: d1(sq), ASSETS, PROXY_BASIC_AUTH: "revuser:revpass", PROXY_BASIC_AUTH_HOSTS: "example.com" };
+const env = { DB: d1(sq), ASSETS, PROXY_BASIC_AUTH: "revuser:revpass", PROXY_BASIC_AUTH_HOSTS: "example.com", PROXY_SPA_HOSTS: "example.com" };
 const req = (path, init = {}) => app.request(path, init, env);
 const J = (obj) => ({ headers: { "content-type": "application/json" }, method: "POST", body: JSON.stringify(obj) });
 
@@ -154,6 +154,7 @@ const html = await r.text();
 assert(r.status === 200 && html.includes("__FUSEN__") && html.includes("fusen-overlay.js"), "プロキシHTMLにオーバーレイ注入");
 assert((r.headers.get("set-cookie") || "").includes(`fsn_canvas=${cid}`), "fsn_canvas クッキー付与");
 assert(lastFetch && lastFetch.headers.authorization === "Basic " + btoa("revuser:revpass"), "Basic認証ヘッダが対象ホスト(example.com)へ付与される");
+assert(html.includes("history.replaceState(history.state"), "SPAモード: 対象ホストのHTMLにルーティングshimが注入される");
 
 // 17) /c/:id, /s/:token
 r = await req(`/c/${cid}`, auth());
@@ -169,6 +170,9 @@ assert(r.status === 302 && (r.headers.get("location") || "") === `/p/${cid}/some
 assert(basicAuthHeader({ PROXY_BASIC_AUTH: "u:p", PROXY_BASIC_AUTH_HOSTS: "example.com" }, "example.com") === "Basic " + btoa("u:p"), "basicAuthHeader: 対象ホストは付与");
 assert(basicAuthHeader({ PROXY_BASIC_AUTH: "u:p", PROXY_BASIC_AUTH_HOSTS: "example.com" }, "evil.com") === null, "basicAuthHeader: 対象外ホストは付与しない");
 assert(basicAuthHeader({ PROXY_BASIC_AUTH_HOSTS: "example.com" }, "example.com") === null, "basicAuthHeader: 資格情報なしは付与しない");
+assert(isSpaHost({ PROXY_SPA_HOSTS: "example.com" }, "example.com") === true, "isSpaHost: 対象ホストは true");
+assert(isSpaHost({ PROXY_SPA_HOSTS: "example.com" }, "evil.com") === false, "isSpaHost: 対象外は false");
+assert(isSpaHost({}, "example.com") === false, "isSpaHost: 未設定は false");
 
 console.log(`\n結果: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -26,10 +26,27 @@ export function basicAuthHeader(env, hostname) {
   }
 }
 
+// SPAモード対象ホストか(クライアントルーティングSPAの表示対応)。指定ホストにのみ適用。
+export function isSpaHost(env, hostname) {
+  const hosts = String((env && env.PROXY_SPA_HOSTS) || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return hosts.includes(String(hostname).toLowerCase());
+}
+
 // HTML にオーバーレイ(注釈UI)を注入する
-export function injectOverlay(html, { canvas, finalUrl, appOrigin, user }) {
+export function injectOverlay(html, { canvas, finalUrl, appOrigin, user, spa }) {
   // CSP メタタグを除去(注入スクリプトのブロックを防ぐ)
   html = html.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi, "");
+
+  // SPAモード: /p/<id> プレフィックスをアプリから隠し、ルーターに「ルートにいる」と思わせる。
+  // <head>の先頭に注入してアプリのJSより先に実行させる。対象ホストのみ(他サイトには影響させない)。
+  if (spa) {
+    const shim = `<script>(function(){try{var p=location.pathname;if(p.indexOf("/p/")===0){var seg=p.slice(3);var i=seg.indexOf("/");var rest=i>=0?seg.slice(i):"/";history.replaceState(history.state,"",rest+location.search+location.hash);}}catch(e){}})();</script>`;
+    if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (h) => h + shim);
+    else html = shim + html;
+  }
 
   // </script> での閉じ抜けを防ぐため < をエスケープ
   const cfg = JSON.stringify({
@@ -170,7 +187,8 @@ export async function proxyPath(c) {
     // フォールバック中継が参照する「現在のキャンバス」クッキー
     headers.append("Set-Cookie", `fsn_canvas=${canvas.id}; Path=/; SameSite=Lax`);
     let html = await upstream.text();
-    html = injectOverlay(html, { canvas, finalUrl, appOrigin: originOf(c.req.raw), user });
+    const spa = isSpaHost(c.env, canvas.host);
+    html = injectOverlay(html, { canvas, finalUrl, appOrigin: originOf(c.req.raw), user, spa });
     headers.set("Content-Type", "text/html; charset=utf-8");
     return new Response(html, { status: upstream.status, headers });
   }
@@ -225,7 +243,8 @@ export async function relayFallback(c) {
 
     if (ctype.includes("text/html")) {
       let html = await upstream.text();
-      html = injectOverlay(html, { canvas, finalUrl: upstream.url || target.href, appOrigin: originOf(c.req.raw), user });
+      const spa = isSpaHost(c.env, canvas.host);
+      html = injectOverlay(html, { canvas, finalUrl: upstream.url || target.href, appOrigin: originOf(c.req.raw), user, spa });
       resHeaders.set("Content-Type", "text/html; charset=utf-8");
       return new Response(html, { status: upstream.status, headers: resHeaders });
     }

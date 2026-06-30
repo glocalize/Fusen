@@ -15,7 +15,8 @@
 	// Basic認証付きステージングのプロキシ対応: ここに列挙したホストにだけ Authorization:Basic を付与する。
 	// 資格情報(ユーザー名:パスワード)は secret 側で設定: npx wrangler secret put PROXY_BASIC_AUTH
 	"vars": {
-		"PROXY_BASIC_AUTH_HOSTS": "d1yq92omvlf4ph.cloudfront.net"
+		"PROXY_BASIC_AUTH_HOSTS": "d1yq92omvlf4ph.cloudfront.net",
+		"PROXY_SPA_HOSTS": "d1yq92omvlf4ph.cloudfront.net"
 	},
 	// public/ を静的アセットとして配信。run_worker_first=true で Worker を必ず先に通し、
 	// 配信は Worker から env.ASSETS.fetch() で明示的に行う(/fsn-assets/* など)。
