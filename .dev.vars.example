@@ -1,0 +1,19 @@
+# ローカル開発用の環境変数(wrangler dev が読み込む)。
+# 実際の値を入れた .dev.vars は .gitignore 済み。このファイルをコピーして使う:
+#   cp .dev.vars.example .dev.vars
+
+# 認証クッキーの HMAC 署名鍵(必須)。未設定だとログインは 500 になる。
+# 生成例: openssl rand -base64 32
+SESSION_SECRET="change-me-to-a-long-random-string"
+
+# --- 以下は任意(Basic認証付きステージング/SPA を表示する場合のみ) ---
+# 本番では wrangler secret put で設定する(内部URLを公開リポジトリに残さないため)。
+
+# Basic 認証の資格情報。値は "ユーザー名:パスワード"。
+# PROXY_BASIC_AUTH="user:pass"
+
+# Basic 認証ヘッダを付与する対象ホスト(カンマ区切り)。
+# PROXY_BASIC_AUTH_HOSTS="staging.example.com"
+
+# SPA ルーティング補正を適用する対象ホスト(カンマ区切り)。
+# PROXY_SPA_HOSTS="staging.example.com"

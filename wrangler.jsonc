@@ -1,0 +1,38 @@
+{
+	// Fusen — Cloudflare Workers 設定
+	// bot が付けた静的判定版を、サーバー(Hono)+D1+静的アセットの構成へ修正。
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "fusen",
+	// account_id はリポジトリに置かず、デプロイ時に環境変数 CLOUDFLARE_ACCOUNT_ID で渡す。
+	"main": "src/index.js",
+	"compatibility_date": "2026-06-16",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true
+	},
+	// プロキシ対象のデプロイ固有設定(Basic認証/SPA対象ホスト)は、内部URLを公開リポジトリに
+	// 残さないため config には書かず secret で設定する(deploy で消えず永続する):
+	//   npx wrangler secret put PROXY_BASIC_AUTH        # 値は "ユーザー名:パスワード"
+	//   npx wrangler secret put PROXY_BASIC_AUTH_HOSTS  # 値は対象ホスト(カンマ区切り)
+	//   npx wrangler secret put PROXY_SPA_HOSTS         # 値は対象ホスト(カンマ区切り)
+	// ローカル開発では .dev.vars に設定する。
+	// public/ を静的アセットとして配信。run_worker_first=true で Worker を必ず先に通し、
+	// 配信は Worker から env.ASSETS.fetch() で明示的に行う(/fsn-assets/* など)。
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"run_worker_first": true
+	},
+	// データストア(JSONファイルの置き換え)。database_id は↓のコマンドで発行して貼る:
+	//   npx wrangler d1 create fusen-db
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "fusen-db",
+			"database_id": "f4627e51-1819-4164-874d-e2c43347f1ee",
+			"migrations_dir": "migrations"
+		}
+	]
+}

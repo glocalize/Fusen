@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fusen! — みんなでサイトレビュー</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 21c-3.8-3.4-6-6.7-6-9.9A6 6 0 0 1 18 11.1c0 3.2-2.2 6.5-6 9.9z' fill='%23FF6B35' stroke='%2321283B' stroke-width='2'/><circle cx='12' cy='11' r='2.3' fill='%23FFF6E9' stroke='%2321283B' stroke-width='1.5'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@700;800&family=M+PLUS+Rounded+1c:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/fsn-assets/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="logo" href="/"><span class="pin"></span>Fusen<em>!</em></a>
+  <div class="right">
+    <a class="btn btn-ghost btn-sm" href="/help">アクセス方法</a>
+    <button class="btn btn-primary" id="newBtn">+ 新しいキャンバス</button>
+    <span class="user-chip"><span class="avatar" id="avatar">?</span><span id="userName">…</span></span>
+    <button class="btn btn-ghost btn-sm" id="logoutBtn" title="ログアウト"><span data-icon="logout" data-size="16"></span></button>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <h1>レビュー、<span class="accent">ペタッ</span>と。</h1>
+    <div class="tabs">
+      <span class="tab active" data-tab="active">アクティブ</span>
+      <span class="tab" data-tab="archived">アーカイブ</span>
+    </div>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">
+    <div class="big" style="color:var(--orange)"><span data-icon="pin" data-size="52"></span></div>
+    <p>まだキャンバスがありません。<br>「+ 新しいキャンバス」からレビューしたいサイトのURLを登録しましょう!</p>
+  </div>
+</main>
+
+<!-- 新規キャンバス モーダル -->
+<div class="modal-bg" id="newModal">
+  <form class="modal" id="newForm">
+    <h2><span data-icon="note" data-size="20"></span> 新しいキャンバス</h2>
+    <div class="field">
+      <label for="cvUrl">レビューするサイトのURL</label>
+      <input type="text" id="cvUrl" placeholder="https://staging.example.com" required>
+    </div>
+    <div class="field">
+      <label for="cvTitle">タイトル(省略可)</label>
+      <input type="text" id="cvTitle" placeholder="例: 新LPの最終確認" maxlength="80">
+    </div>
+    <div id="urlWarn" style="display:none;background:#fff0f6;border:2px solid var(--pink);border-radius:12px;padding:10px 14px;font-size:13px;font-weight:700;margin-bottom:4px"></div>
+    <div class="foot">
+      <button type="button" class="btn" id="newCancel">キャンセル</button>
+      <button type="submit" class="btn btn-primary" id="newSubmit">作成する</button>
+    </div>
+  </form>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/fsn-assets/icons.js"></script>
+<script src="/fsn-assets/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "name": "fusen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "社内向けWebサイトレビューツール — ライブサイトにピン留めコメント",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "wrangler dev",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev",
+    "cf:dev": "wrangler dev",
+    "cf:deploy": "wrangler deploy",
+    "cf:seed:gen": "node scripts/migrate-json-to-d1.mjs",
+    "cf:migrate:local": "wrangler d1 migrations apply fusen-db --local",
+    "cf:migrate:remote": "wrangler d1 migrations apply fusen-db --remote",
+    "cf:seed:local": "wrangler d1 execute fusen-db --local --file=seed.sql",
+    "cf:seed:remote": "wrangler d1 execute fusen-db --remote --file=seed.sql",
+    "test": "npm run test:d1 && npm run test:routes && npm run test:security",
+    "test:d1": "node --experimental-sqlite scripts/test-d1.mjs",
+    "test:routes": "node --experimental-sqlite scripts/test-routes.mjs",
+    "test:security": "node --experimental-sqlite scripts/test-security.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.103.0"
+  }
+}

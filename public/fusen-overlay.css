@@ -1,0 +1,365 @@
+/* ================================================
+   Fusen! オーバーレイ — プロキシ表示したサイトに注入される注釈UI
+   ホストページのスタイルと衝突しないよう fsn- 接頭辞 + 高 z-index
+   ================================================ */
+@import url("https://fonts.googleapis.com/css2?family=Baloo+2:wght@700;800&family=M+PLUS+Rounded+1c:wght@400;500;700;800&display=swap");
+
+#fsn-root {
+  --fsn-paper: #fff6e9;
+  --fsn-ink: #21283b;
+  --fsn-orange: #ff6b35;
+  --fsn-yellow: #ffc53d;
+  --fsn-teal: #0fb5a5;
+  --fsn-pink: #ff4f9a;
+  --fsn-white: #fff;
+  --fsn-line: 2.5px solid #21283b;
+  --fsn-font: "M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", sans-serif;
+  font-family: var(--fsn-font);
+  color: var(--fsn-ink);
+  font-size: 14px;
+  line-height: 1.6;
+}
+#fsn-root *, #fsn-root *::before, #fsn-root *::after { box-sizing: border-box; }
+#fsn-root button { font-family: var(--fsn-font); cursor: pointer; }
+
+/* ---------- 下部ツールバー ---------- */
+.fsn-toolbar {
+  position: fixed;
+  bottom: 18px; left: 50%;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px;
+  background: var(--fsn-ink);
+  border: var(--fsn-line);
+  border-radius: 999px;
+  padding: 8px 12px;
+  box-shadow: 5px 5px 0 rgba(33, 40, 59, 0.35);
+  z-index: 2147483000;
+  white-space: nowrap;
+}
+.fsn-tb-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: transparent;
+  color: var(--fsn-paper);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  font-size: 13.5px; font-weight: 800;
+  padding: 7px 13px;
+}
+.fsn-tb-btn:hover { border-color: var(--fsn-paper); }
+.fsn-tb-btn.fsn-cta { background: var(--fsn-yellow); color: var(--fsn-ink); border-color: var(--fsn-ink); }
+.fsn-tb-btn.fsn-cta:hover { background: #ffd56b; }
+.fsn-tb-logo {
+  width: 22px; height: 22px;
+  background: var(--fsn-orange);
+  border: 2px solid var(--fsn-paper);
+  border-radius: 50% 50% 50% 4px;
+  transform: rotate(-45deg);
+  flex: none;
+}
+.fsn-tb-count {
+  background: var(--fsn-orange); color: #fff;
+  border-radius: 999px;
+  font-size: 11.5px; font-weight: 800;
+  padding: 1px 8px;
+}
+.fsn-tb-sep { width: 2px; height: 22px; background: rgba(255, 246, 233, 0.25); border-radius: 2px; }
+
+/* モード切替トグル */
+.fsn-mode {
+  display: inline-flex; align-items: center;
+  background: rgba(255, 246, 233, 0.12);
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+}
+.fsn-mode button {
+  border: 2px solid transparent;
+  background: transparent;
+  color: var(--fsn-paper);
+  font-size: 13px; font-weight: 800;
+  border-radius: 999px;
+  padding: 5px 14px;
+}
+.fsn-mode button.fsn-on { background: var(--fsn-orange); color: #fff; border-color: var(--fsn-ink); }
+
+.fsn-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--fsn-teal); color: #fff;
+  border: 2px solid var(--fsn-paper);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 13px;
+  flex: none;
+}
+
+/* ---------- コメントモードの説明バナー ---------- */
+.fsn-hint {
+  position: fixed;
+  top: 16px; left: 50%;
+  transform: translateX(-50%);
+  background: var(--fsn-yellow);
+  border: var(--fsn-line);
+  border-radius: 999px;
+  font-weight: 800; font-size: 13.5px;
+  padding: 8px 20px;
+  box-shadow: 4px 4px 0 rgba(33,40,59,.3);
+  z-index: 2147483000;
+  display: none;
+}
+
+/* ---------- クリックキャッチャー ---------- */
+#fsn-catcher {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  z-index: 2147482000;
+  cursor: crosshair;
+  display: none;
+}
+
+/* ---------- 要素ハイライト ---------- */
+#fsn-hl {
+  position: fixed;
+  border: 2.5px dashed var(--fsn-orange);
+  background: rgba(255, 107, 53, 0.10);
+  border-radius: 8px;
+  pointer-events: none;
+  z-index: 2147481900;
+  display: none;
+  transition: all 0.08s ease-out;
+}
+
+/* ---------- ピン(fixedレイヤ + 毎フレームDOM追従) ---------- */
+#fsn-pins { position: fixed; top: 0; left: 0; width: 0; height: 0; overflow: visible; z-index: 2147482500; }
+.fsn-pin {
+  position: absolute;
+  width: 34px; height: 34px;
+  margin: -34px 0 0 -6px; /* 先端=クリック位置 */
+  background: var(--fsn-orange);
+  color: #fff;
+  border: 2.5px solid var(--fsn-ink);
+  border-radius: 50% 50% 50% 4px;
+  transform: rotate(-45deg);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 13px;
+  font-family: var(--fsn-font);
+  box-shadow: 2px 2px 0 rgba(33, 40, 59, 0.4);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: transform 0.12s ease;
+}
+.fsn-pin span { transform: rotate(45deg); }
+.fsn-pin:hover { transform: rotate(-45deg) scale(1.15); }
+.fsn-pin.fsn-resolved { background: var(--fsn-teal); opacity: 0.85; }
+.fsn-pin.fsn-temp { background: var(--fsn-pink); animation: fsn-bounce 0.4s ease; }
+@keyframes fsn-bounce {
+  0% { transform: rotate(-45deg) scale(0); }
+  70% { transform: rotate(-45deg) scale(1.25); }
+  100% { transform: rotate(-45deg) scale(1); }
+}
+
+/* ---------- ポップオーバー(コメント入力・スレッド) ---------- */
+.fsn-pop {
+  position: fixed;
+  width: 320px;
+  background: var(--fsn-white);
+  border: var(--fsn-line);
+  border-radius: 16px;
+  box-shadow: 6px 6px 0 rgba(33, 40, 59, 0.85);
+  z-index: 2147483100;
+  overflow: hidden;
+  animation: fsn-pop-in 0.15s ease;
+}
+@keyframes fsn-pop-in { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.fsn-pop-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--fsn-paper);
+  border-bottom: var(--fsn-line);
+  font-weight: 800; font-size: 13px;
+}
+.fsn-pop-head .fsn-x { background: none; border: none; font-size: 16px; font-weight: 800; color: var(--fsn-ink); }
+.fsn-pop-body { max-height: 300px; overflow-y: auto; padding: 12px 14px; }
+.fsn-msg { margin-bottom: 12px; }
+.fsn-msg.fsn-reply { margin-left: 18px; padding-left: 10px; border-left: 3px solid var(--fsn-yellow); }
+.fsn-msg .fsn-who { font-weight: 800; font-size: 12.5px; display: flex; gap: 6px; align-items: baseline; }
+.fsn-msg .fsn-when { color: #8a90a3; font-weight: 500; font-size: 11px; }
+.fsn-msg .fsn-text { font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+.fsn-guest-tag { background: var(--fsn-yellow); border: 1.5px solid var(--fsn-ink); border-radius: 6px; font-size: 10px; padding: 0 5px; font-weight: 800; }
+.fsn-pop-foot { padding: 10px 14px 12px; border-top: 2px dashed rgba(33,40,59,0.2); }
+.fsn-pop textarea {
+  width: 100%;
+  font-family: var(--fsn-font);
+  font-size: 13.5px;
+  border: var(--fsn-line);
+  border-radius: 10px;
+  background: var(--fsn-paper);
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 60px;
+  outline: none;
+}
+.fsn-pop textarea:focus { background: #fff; box-shadow: 2px 2px 0 var(--fsn-yellow); }
+.fsn-pop-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; flex-wrap: wrap; }
+.fsn-btn {
+  font-size: 12.5px; font-weight: 800;
+  border: 2px solid var(--fsn-ink);
+  border-radius: 999px;
+  padding: 5px 13px;
+  background: var(--fsn-white);
+  box-shadow: 2px 2px 0 var(--fsn-ink);
+}
+.fsn-btn:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--fsn-ink); }
+.fsn-btn.fsn-primary { background: var(--fsn-orange); color: #fff; }
+.fsn-btn.fsn-teal { background: var(--fsn-teal); color: #fff; }
+.fsn-btn.fsn-plain { box-shadow: none; border-color: transparent; }
+.fsn-btn.fsn-danger { color: var(--fsn-pink); }
+
+/* ---------- サイドバー ---------- */
+.fsn-sidebar {
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  width: 330px;
+  background: var(--fsn-paper);
+  border-right: var(--fsn-line);
+  box-shadow: 6px 0 0 rgba(33, 40, 59, 0.15);
+  z-index: 2147482900;
+  transform: translateX(-105%);
+  transition: transform 0.22s ease;
+  display: flex; flex-direction: column;
+}
+.fsn-sidebar.fsn-open { transform: translateX(0); }
+.fsn-sb-head { padding: 16px 16px 10px; border-bottom: var(--fsn-line); background: var(--fsn-white); }
+.fsn-sb-head h2 { margin: 0 0 10px; font-size: 17px; font-weight: 800; font-family: "Baloo 2", var(--fsn-font); display: flex; justify-content: space-between; align-items: center; }
+.fsn-sb-head input {
+  width: 100%;
+  font-family: var(--fsn-font); font-size: 13px;
+  border: var(--fsn-line); border-radius: 999px;
+  padding: 7px 14px;
+  background: var(--fsn-paper);
+  outline: none;
+  margin-bottom: 9px;
+}
+.fsn-chips { display: flex; gap: 6px; }
+.fsn-chip {
+  font-size: 12px; font-weight: 800;
+  border: 2px solid var(--fsn-ink);
+  border-radius: 999px;
+  padding: 3px 12px;
+  background: var(--fsn-white);
+}
+.fsn-chip.fsn-on { background: var(--fsn-ink); color: var(--fsn-paper); }
+.fsn-sb-list { flex: 1; overflow-y: auto; padding: 12px; }
+.fsn-sb-item {
+  background: var(--fsn-white);
+  border: 2px solid var(--fsn-ink);
+  border-radius: 12px;
+  box-shadow: 3px 3px 0 rgba(33,40,59,0.25);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.fsn-sb-item:hover { transform: translate(-1px, -1px); }
+.fsn-sb-item .fsn-row1 { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; }
+.fsn-sb-num {
+  width: 22px; height: 22px; flex: none;
+  background: var(--fsn-orange); color: #fff;
+  border: 2px solid var(--fsn-ink); border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 800;
+}
+.fsn-sb-item.fsn-done .fsn-sb-num { background: var(--fsn-teal); }
+.fsn-sb-item.fsn-done .fsn-prev { text-decoration: line-through; opacity: 0.6; }
+.fsn-sb-item .fsn-prev { font-size: 13px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.fsn-sb-item .fsn-sub { font-size: 11px; color: #8a90a3; font-weight: 700; }
+.fsn-sb-empty { text-align: center; color: #8a90a3; font-weight: 700; padding: 40px 14px; }
+
+/* このページのみ表示トグル */
+.fsn-sb-toggle { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; font-weight: 700; color: #5a6175; cursor: pointer; user-select: none; }
+.fsn-sb-toggle input { width: 14px; height: 14px; accent-color: var(--fsn-orange); cursor: pointer; margin: 0; }
+
+/* ページ別グループ見出し */
+.fsn-pg-head { display: flex; align-items: center; gap: 6px; margin: 16px 2px 8px; font-size: 11.5px; font-weight: 800; color: #8a90a3; }
+.fsn-pg-head:first-child { margin-top: 2px; }
+.fsn-pg-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+.fsn-pg-count { margin-left: auto; flex: none; background: #e7e3d6; color: #5a6175; border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+.fsn-pg-current { color: var(--fsn-ink); }
+.fsn-pg-current .fsn-pg-count { background: var(--fsn-ink); color: var(--fsn-paper); }
+.fsn-pg-tag { flex: none; background: var(--fsn-yellow); color: var(--fsn-ink); border: 1.5px solid var(--fsn-ink); border-radius: 999px; padding: 0 7px; font-size: 10px; font-weight: 800; }
+
+/* 別ページのコメント項目(ピン番号の代わりにピンアイコン) */
+.fsn-sb-item.fsn-other .fsn-sb-num { background: #b9bccb; }
+.fsn-sb-item.fsn-other .fsn-sb-num svg { stroke: #fff; }
+
+/* ---------- レビューモーダル ---------- */
+.fsn-modal-bg {
+  position: fixed; inset: 0;
+  background: rgba(33, 40, 59, 0.5);
+  z-index: 2147483200;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.fsn-modal {
+  background: var(--fsn-white);
+  border: var(--fsn-line);
+  border-radius: 18px;
+  box-shadow: 8px 8px 0 rgba(33,40,59,0.85);
+  width: 430px; max-width: 100%;
+  max-height: 86vh; overflow-y: auto;
+  padding: 22px;
+  animation: fsn-pop-in 0.18s ease;
+}
+.fsn-modal h2 { margin: 0 0 14px; font-size: 19px; font-weight: 800; font-family: "Baloo 2", var(--fsn-font); }
+.fsn-verdicts { display: flex; gap: 10px; margin-bottom: 12px; }
+.fsn-verdict {
+  flex: 1;
+  border: var(--fsn-line); border-radius: 12px;
+  padding: 12px 10px;
+  text-align: center;
+  font-weight: 800; font-size: 13.5px;
+  cursor: pointer;
+  background: var(--fsn-paper);
+}
+.fsn-verdict.fsn-sel-ok { background: var(--fsn-teal); color: #fff; box-shadow: 3px 3px 0 var(--fsn-ink); }
+.fsn-verdict.fsn-sel-ng { background: var(--fsn-pink); color: #fff; box-shadow: 3px 3px 0 var(--fsn-ink); }
+.fsn-history { margin-top: 16px; border-top: 2px dashed rgba(33,40,59,0.25); padding-top: 12px; }
+.fsn-history h3 { margin: 0 0 8px; font-size: 13px; font-weight: 800; color: #8a90a3; }
+.fsn-h-item { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; margin-bottom: 6px; }
+.fsn-h-badge { border: 2px solid var(--fsn-ink); border-radius: 999px; padding: 1px 9px; font-size: 11px; font-weight: 800; flex: none; }
+.fsn-h-badge.ok { background: var(--fsn-teal); color: #fff; }
+.fsn-h-badge.ng { background: var(--fsn-pink); color: #fff; }
+
+/* ---------- 送信後フィードバック ---------- */
+.fsn-celebrate { width: 360px; text-align: center; }
+.fsn-celebrate-icon {
+  width: 76px; height: 76px;
+  margin: 4px auto 12px;
+  border: var(--fsn-line);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 4px 4px 0 var(--fsn-ink);
+  animation: fsn-stamp 0.45s cubic-bezier(0.2, 1.6, 0.4, 1);
+}
+.fsn-celebrate-icon.fsn-c-ok { background: var(--fsn-teal); color: #fff; }
+.fsn-celebrate-icon.fsn-c-ng { background: var(--fsn-yellow); color: var(--fsn-ink); }
+@keyframes fsn-stamp {
+  0% { transform: scale(2.2) rotate(-12deg); opacity: 0; }
+  60% { transform: scale(0.92) rotate(2deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0); }
+}
+
+/* ---------- トースト ---------- */
+.fsn-toast {
+  position: fixed;
+  bottom: 84px; left: 50%;
+  transform: translateX(-50%) translateY(16px);
+  background: var(--fsn-ink); color: var(--fsn-paper);
+  font-weight: 800; font-size: 13.5px;
+  font-family: var(--fsn-font);
+  padding: 10px 20px;
+  border-radius: 999px;
+  opacity: 0;
+  transition: all 0.25s ease;
+  pointer-events: none;
+  z-index: 2147483300;
+}
+.fsn-toast.fsn-show { opacity: 1; transform: translateX(-50%) translateY(0); }
