@@ -3,6 +3,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import * as q from "../lib/db-d1.js";
+import { buildSeedSql } from "./seed-sql.mjs";
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -84,18 +85,17 @@ assert((await q.listCanvases(DB, false)).length === 0, "listCanvases(false) は�
 assert((await q.listCanvases(DB, true)).length === 1, "listCanvases(true) はアーカイブのみ");
 assert((await q.getCanvasByToken(DB, "s_t")).id === "c_t", "getCanvasByToken");
 
-// ============ Part 2: 実 db.json → seed.sql の件数/整合性 ============
-console.log("Part 2: 実データ移行(seed.sql)の検証");
-let seed = null;
-try { seed = readFileSync(here("../seed.sql"), "utf8"); }
-catch { console.error("  (seed.sql 未生成。先に migrate-json-to-d1.mjs を実行)"); }
-if (seed) {
+// ============ Part 2: データ移行(buildSeedSql)の件数/整合性 ============
+// git 管理外の実データではなく合成フィクスチャで検証する(hermetic)。
+// buildSeedSql の出力がソースの件数どおりに投入され、FK 的にも孤立が無いことを確認。
+console.log("Part 2: データ移行(buildSeedSql)の検証");
+{
+  const src = JSON.parse(readFileSync(here("../test/fixtures/db.json"), "utf8"));
   const sq2 = new DatabaseSync(":memory:");
   sq2.exec("PRAGMA foreign_keys = ON;");
   sq2.exec(schema);
-  sq2.exec(seed);
+  sq2.exec(buildSeedSql(src));
   const cnt = (t) => sq2.prepare(`SELECT count(*) AS n FROM ${t}`).get().n;
-  const src = JSON.parse(readFileSync(here("../data/db.json"), "utf8"));
   assert(cnt("users") === src.users.length, `users 件数一致 (${cnt("users")} = ${src.users.length})`);
   assert(cnt("canvases") === src.canvases.length, `canvases 件数一致 (${cnt("canvases")} = ${src.canvases.length})`);
   assert(cnt("comments") === src.comments.length, `comments 件数一致 (${cnt("comments")} = ${src.comments.length})`);

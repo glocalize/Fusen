@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import app from "../src/index.js";
 import { injectOverlay } from "../src/proxy.js";
 import { assertPublicUrl, isPrivateIPv4, isPrivateIPv6, safeFetch, BlockedAddressError } from "../lib/safefetch.js";
+import { buildSeedSql } from "./seed-sql.mjs";
 
 let pass = 0, fail = 0;
 function ok(cond, msg) {
@@ -36,7 +37,8 @@ const here = (p) => new URL(p, import.meta.url);
 const sq = new DatabaseSync(":memory:");
 sq.exec("PRAGMA foreign_keys = ON;");
 sq.exec(readFileSync(here("../migrations/0001_init.sql"), "utf8"));
-sq.exec(readFileSync(here("../seed.sql"), "utf8"));
+// git 管理外の seed.sql ではなく合成フィクスチャから seed を組み立てる(hermetic)。
+sq.exec(buildSeedSql(JSON.parse(readFileSync(here("../test/fixtures/db.json"), "utf8"))));
 
 const ASSETS = { fetch: async (req) => new Response(`<!doctype html><html><body>ASSET ${new URL(req.url).pathname}</body></html>`, { headers: { "content-type": "text/html" } }) };
 
