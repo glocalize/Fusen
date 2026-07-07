@@ -49,6 +49,15 @@ if (isGuest) {
   document.getElementById("desc").textContent = "お名前を入れるだけで、サイトに直接コメントできます。";
 }
 
+// 前回の名前を復元(#5): 認証が切れて再ログインになっても名前を入れ直さずに済むよう、
+// ログイン成功時に控えた名前をフォームへプリフィルする。fsn_user は HttpOnly で
+// JS から読めないため localStorage に保持する。
+const LAST_NAME_KEY = "fsn_last_name";
+try {
+  const saved = localStorage.getItem(LAST_NAME_KEY);
+  if (saved) document.getElementById("name").value = saved;
+} catch {}
+
 function toast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg;
@@ -69,6 +78,7 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
     const d = await r.json().catch(() => ({}));
     return toast(d.error || "ログインに失敗しました");
   }
+  try { localStorage.setItem(LAST_NAME_KEY, name); } catch {}
   location.href = next;
 });
 </script>
