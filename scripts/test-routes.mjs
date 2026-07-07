@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import app from "../src/index.js";
 import { basicAuthHeader, isSpaHost } from "../src/proxy.js";
+import { buildSeedSql } from "./seed-sql.mjs";
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -30,10 +31,13 @@ function d1(sq) {
 }
 
 const here = (p) => new URL(p, import.meta.url);
+// git 管理外の実データ(seed.sql / data/db.json)ではなく、コミット済みの合成
+// フィクスチャから seed を組み立てて hermetic に回す(CI でも動く)。
+const fixture = JSON.parse(readFileSync(here("../test/fixtures/db.json"), "utf8"));
 const sq = new DatabaseSync(":memory:");
 sq.exec("PRAGMA foreign_keys = ON;");
 sq.exec(readFileSync(here("../migrations/0001_init.sql"), "utf8"));
-sq.exec(readFileSync(here("../seed.sql"), "utf8")); // 既存4キャンバス等
+sq.exec(buildSeedSql(fixture)); // フィクスチャの4キャンバス等
 
 // ASSETS モック(静的配信)。リクエストパスを反映した HTML を返す。
 const ASSETS = {
@@ -80,8 +84,8 @@ r = await req("/api/me", auth());
 j = await r.json();
 assert(j.user?.name === "太郎", "/api/me が本人を返す");
 
-// 6) 一覧(seed のアーカイブ状態を実データから算出して検証)
-const seedCanvases = JSON.parse(readFileSync(here("../data/db.json"), "utf8")).canvases;
+// 6) 一覧(seed のアーカイブ状態をフィクスチャから算出して検証)
+const seedCanvases = fixture.canvases;
 const activeN = seedCanvases.filter((x) => !x.archived).length;
 const archivedN = seedCanvases.length - activeN;
 r = await req("/api/canvases", auth());

@@ -1,0 +1,28 @@
+name: CI
+
+# PR とデフォルトブランチへの push でテストを実行する。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同一ブランチで新しい push があれば古い実行はキャンセルする。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # テストは node:sqlite(--experimental-sqlite)を使うため Node 22 以上が必須。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test

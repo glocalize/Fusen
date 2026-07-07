@@ -1,0 +1,21 @@
+{
+  "_comment": "テスト用の合成フィクスチャ。実データ(git 管理外の data/db.json)の代わりに CI/ローカルで hermetic にテストを回すためのもの。canvases はちょうど4件(active 3 / archived 1)である点を test-routes が前提にしている。",
+  "users": [
+    { "id": "u_fx_alice", "name": "フィクスチャ 太郎", "guest": false, "created_at": "2026-01-01T00:00:00.000Z" },
+    { "id": "u_fx_bob", "name": "フィクスチャ 花子", "guest": false, "created_at": "2026-01-02T00:00:00.000Z" }
+  ],
+  "canvases": [
+    { "id": "c_fx_1", "title": "サンプルサイトA", "url": "https://a.example.com/", "host": "a.example.com", "share_token": "s_fx_1aaaaaaaaaaaaaaaaaaa", "archived": false, "created_by": "u_fx_alice", "created_at": "2026-01-03T00:00:00.000Z" },
+    { "id": "c_fx_2", "title": "サンプルサイトB", "url": "https://b.example.com/", "host": "b.example.com", "share_token": "s_fx_2bbbbbbbbbbbbbbbbbbb", "archived": false, "created_by": "u_fx_alice", "created_at": "2026-01-04T00:00:00.000Z" },
+    { "id": "c_fx_3", "title": "サンプルサイトC", "url": "https://c.example.com/", "host": "c.example.com", "share_token": "s_fx_3ccccccccccccccccccc", "archived": false, "created_by": "u_fx_bob", "created_at": "2026-01-05T00:00:00.000Z" },
+    { "id": "c_fx_4", "title": "アーカイブ済みD", "url": "https://d.example.com/", "host": "d.example.com", "share_token": "s_fx_4ddddddddddddddddddd", "archived": true, "created_by": "u_fx_alice", "created_at": "2026-01-06T00:00:00.000Z" }
+  ],
+  "comments": [
+    { "id": "cm_fx_1", "canvas_id": "c_fx_1", "page": "https://a.example.com/", "selector": "h1", "rx": 0.5, "ry": 0.5, "ax": null, "ay": null, "body": "見出しを直したい", "author": "フィクスチャ 太郎", "author_id": "u_fx_alice", "guest": false, "status": "active", "parent_id": null, "resolved_by": null, "created_at": "2026-01-07T00:00:00.000Z" },
+    { "id": "cm_fx_2", "canvas_id": "c_fx_1", "page": "https://a.example.com/", "selector": null, "rx": null, "ry": null, "ax": null, "ay": null, "body": "了解です", "author": "フィクスチャ 花子", "author_id": "u_fx_bob", "guest": false, "status": "active", "parent_id": "cm_fx_1", "resolved_by": null, "created_at": "2026-01-07T01:00:00.000Z" },
+    { "id": "cm_fx_3", "canvas_id": "c_fx_2", "page": "https://b.example.com/", "selector": ".cta", "rx": 0.2, "ry": 0.8, "ax": null, "ay": null, "body": "ボタンの色が気になる", "author": "フィクスチャ 太郎", "author_id": "u_fx_alice", "guest": false, "status": "resolved", "parent_id": null, "resolved_by": "フィクスチャ 太郎", "created_at": "2026-01-08T00:00:00.000Z" }
+  ],
+  "reviews": [
+    { "id": "rv_fx_1", "canvas_id": "c_fx_1", "verdict": "approved", "comment": "OKです", "author": "フィクスチャ 花子", "created_at": "2026-01-09T00:00:00.000Z" }
+  ]
+}
