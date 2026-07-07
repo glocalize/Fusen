@@ -328,6 +328,35 @@
 .fsn-h-badge.ok { background: var(--fsn-teal); color: #fff; }
 .fsn-h-badge.ng { background: var(--fsn-pink); color: #fff; }
 
+/* ---------- Issue化モーダル ---------- */
+.fsn-issue-modal { width: 480px; }
+.fsn-issue-hint {
+  margin: 0 0 14px; font-size: 12.5px; line-height: 1.6; font-weight: 700;
+  color: #6b7185; background: var(--fsn-paper);
+  border: 2px dashed rgba(33,40,59,0.22); border-radius: 10px; padding: 9px 11px;
+}
+.fsn-issue-label { display: block; font-size: 12px; font-weight: 800; color: #8a90a3; margin: 12px 0 5px; }
+.fsn-issue-titlerow { display: flex; gap: 8px; align-items: stretch; }
+.fsn-issue-title-in {
+  flex: 1; min-width: 0;
+  font-family: inherit; font-size: 13px; font-weight: 700; color: var(--fsn-ink);
+  border: var(--fsn-line); border-radius: 10px; background: var(--fsn-paper);
+  padding: 8px 10px; outline: none;
+}
+.fsn-issue-body {
+  width: 100%; box-sizing: border-box;
+  min-height: 172px; resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.55; color: var(--fsn-ink);
+  border: var(--fsn-line); border-radius: 10px; background: var(--fsn-paper);
+  padding: 9px 11px; outline: none;
+}
+.fsn-issue-bodyrow { display: flex; justify-content: flex-end; margin-top: 8px; }
+/* 画像コピー系は左、閉じるは右端(margin-left:auto)で同じ行に揃える */
+.fsn-issue-shotrow { justify-content: flex-start; align-items: center; }
+.fsn-issue-shotrow [data-act="close"] { margin-left: auto; }
+.fsn-issue-shotnote { font-size: 12px; font-weight: 800; color: var(--fsn-teal); }
+
 /* ---------- 送信後フィードバック ---------- */
 .fsn-celebrate { width: 360px; text-align: center; }
 .fsn-celebrate-icon {
