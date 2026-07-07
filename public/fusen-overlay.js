@@ -11,6 +11,10 @@
   if (!CFG) return;
   const API = CFG.apiBase;
 
+  // 自身の script タグの nonce を引き継ぐ。対象サイトが strict-dynamic な CSP でも、
+  // 信頼済みスクリプトが動的に追加した <script>(html2canvas 等)が実行を許可される。
+  const NONCE = (document.currentScript && document.currentScript.nonce) || "";
+
   // アイコン(外部ファイルに依存せず内蔵 — 読み込み順・キャッシュの影響を受けない)
   const ICON_PATHS = {
     pin: '<path d="M12 21c-3.8-3.4-6-6.7-6-9.9A6 6 0 0 1 18 11.1c0 3.2-2.2 6.5-6 9.9z"/><circle cx="12" cy="11" r="2.3"/>',
@@ -402,6 +406,7 @@
           <textarea placeholder="返信を書く…"></textarea>
           <div class="fsn-pop-actions">
             ${mine ? '<button class="fsn-btn fsn-plain fsn-danger" data-act="del">削除</button>' : ""}
+            <button class="fsn-btn fsn-plain" data-act="issue" title="このスレッドをGitHub Issue用テキストにする">${I("flag", 13)} Issue化</button>
             <button class="fsn-btn ${c.status === "resolved" ? "" : "fsn-teal"}" data-act="resolve">${c.status === "resolved" ? I("undo", 13) + " 再オープン" : I("check", 13) + " 解決にする"}</button>
             <button class="fsn-btn fsn-primary" data-act="reply">返信</button>
           </div>
@@ -442,6 +447,7 @@
         toast(e.message);
       }
     });
+    popEl.querySelector('[data-act="issue"]').addEventListener("click", () => openIssuePanel(id));
     const delBtn = popEl.querySelector('[data-act="del"]');
     if (delBtn)
       delBtn.addEventListener("click", async () => {
@@ -544,6 +550,198 @@
         toast("このコメントのページを開けませんでした");
       }
     }
+  }
+
+  // ---------- Issue化(コメントスレッド → GitHub Issue用テキスト) ----------
+  // 依存(html2canvas / issue-format)は使う瞬間に遅延ロード。全プロキシページを重くしない。
+  function loadScriptOnce(src, globalKey, cache) {
+    if (window[globalKey]) return Promise.resolve(window[globalKey]);
+    if (cache.p) return cache.p;
+    cache.p = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src;
+      // nonce は IDL プロパティのみで渡す。content 属性に書くと、同一オリジンで動く未信頼な
+      // プロキシ対象JSが CSS 属性セレクタで nonce を抜ける余地を残すため付けない(nonce hiding)。
+      if (NONCE) s.nonce = NONCE;
+      s.onload = () => (window[globalKey] ? res(window[globalKey]) : rej(new Error("no global")));
+      s.onerror = () => { cache.p = null; rej(new Error("load failed")); };
+      (document.head || document.documentElement).appendChild(s);
+    });
+    return cache.p;
+  }
+  const _h2c = {}, _fmt = {};
+  const loadHtml2Canvas = () => loadScriptOnce(`${API}/fsn-assets/html2canvas.min.js`, "html2canvas", _h2c);
+  const loadIssueFormat = () => loadScriptOnce(`${API}/fsn-assets/issue-format.js`, "FsnIssueFormat", _fmt);
+
+  // deep_link: 既存 openByHash() が拾える「現在のプロキシページURL + #fsn=<id>」を組み立てる。
+  function deepLinkFor(c) {
+    try {
+      const u = new URL(c.page);
+      return `${API}/p/${CFG.canvasId}${u.pathname}${u.search}#fsn=${encodeURIComponent(c.id)}`;
+    } catch {
+      return `${location.origin}${location.pathname}${location.search}#fsn=${encodeURIComponent(c.id)}`;
+    }
+  }
+
+  // クリップボード/ダウンロード補助
+  async function copyText(text) { await navigator.clipboard.writeText(text); }
+  async function copyImage(blob) {
+    if (typeof ClipboardItem === "undefined" || !navigator.clipboard || !navigator.clipboard.write)
+      throw new Error("clipboard-image-unsupported");
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+  }
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // キャンバスがほぼ真っ白/透明か(スクショ失敗の簡易判定)。粗いグリッドサンプリング。
+  function isBlankCanvas(canvas) {
+    try {
+      const ctx = canvas.getContext("2d");
+      const step = Math.max(1, Math.floor(Math.min(canvas.width, canvas.height) / 40));
+      let total = 0, blank = 0;
+      for (let y = 0; y < canvas.height; y += step) {
+        for (let x = 0; x < canvas.width; x += step) {
+          const [r, g, b, a] = ctx.getImageData(x, y, 1, 1).data;
+          total++;
+          if (a < 8 || (r > 248 && g > 248 && b > 248)) blank++;
+        }
+      }
+      return total === 0 || blank / total > 0.995;
+    } catch { return false; }
+  }
+
+  // 画面全体(現在のビューポート)をキャプチャして PNG Blob を返す。ピンは残す。撮れない/空なら null。
+  async function captureThreadShot(c) {
+    const h2c = await loadHtml2Canvas();
+    // 対象のピンが画面内に写るよう、対象要素(なければピン座標)をビューポート中央へ寄せてから撮る
+    const before = resolveViewport(c);
+    if (before.el) before.el.scrollIntoView({ block: "center", inline: "center" });
+    else window.scrollTo({ top: Math.max(0, c.ay - innerHeight / 2) });
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    updatePositions();
+
+    // Fusen自身のUI(data-fsn)は写さない。ただし #fsn-root と #fsn-pins は残してピンだけ写す。
+    const ignoreElements = (elm) =>
+      elm && elm.nodeType === 1 && elm.hasAttribute && elm.hasAttribute("data-fsn") &&
+      elm.id !== "fsn-root" && elm.id !== "fsn-pins";
+
+    // 画面全体 = 現在のビューポート矩形(スクロール位置基準)
+    const canvas = await h2c(document.body, {
+      backgroundColor: "#ffffff",
+      scale: Math.min(2, window.devicePixelRatio || 1),
+      useCORS: true,
+      logging: false,
+      x: scrollX,
+      y: scrollY,
+      width: innerWidth,
+      height: innerHeight,
+      windowWidth: document.documentElement.scrollWidth,
+      windowHeight: document.documentElement.scrollHeight,
+      ignoreElements,
+    });
+    if (isBlankCanvas(canvas)) return null;
+    return await new Promise((res) => canvas.toBlob(res, "image/png"));
+  }
+
+  async function openIssuePanel(id) {
+    const c = comments.find((x) => x.id === id);
+    if (!c) return;
+    const idx = roots().findIndex((x) => x.id === id) + 1;
+    const reps = repliesOf(id);
+
+    let F;
+    try { F = await loadIssueFormat(); }
+    catch { return toast("Issue化機能の読み込みに失敗しました"); }
+
+    const threadBlock = F.buildThreadBlock(c, reps);
+    const title = F.buildIssueTitle({ canvasTitle: CFG.canvasTitle, pinNo: idx, rootBody: c.body });
+    const body = F.buildIssueBody({
+      canvasTitle: CFG.canvasTitle,
+      pageUrl: c.page,
+      selector: c.selector,
+      pinNo: idx,
+      status: c.status,
+      deepLink: deepLinkFor(c),
+      rootBody: c.body,
+      threadBlock,
+      generatedAt: new Date().toISOString(),
+    });
+
+    closePop();
+    const bg = el(`
+      <div class="fsn-modal-bg" data-fsn>
+        <div class="fsn-modal fsn-issue-modal">
+          <h2>${I("flag", 18)} Issue にする</h2>
+          <p class="fsn-issue-hint">Issueの新規作成画面で ①タイトルを貼付 → ②本文を貼付 → ③本文中の「スクリーンショット」欄で画像を貼付(Ctrl/Cmd+V)します。</p>
+          <label class="fsn-issue-label">タイトル</label>
+          <div class="fsn-issue-titlerow">
+            <input class="fsn-issue-title-in" type="text" readonly value="${esc(title)}">
+            <button class="fsn-btn" data-act="copytitle">コピー</button>
+          </div>
+          <label class="fsn-issue-label">本文(Markdown)</label>
+          <textarea class="fsn-issue-body" readonly>${esc(body)}</textarea>
+          <div class="fsn-issue-bodyrow">
+            <button class="fsn-btn fsn-primary" data-act="copybody">本文をコピー</button>
+          </div>
+          <div class="fsn-pop-actions fsn-issue-shotrow" style="margin-top:14px">
+            <button class="fsn-btn fsn-teal" data-act="copyimg">${I("pin", 13)} 画像をコピー</button>
+            <button class="fsn-btn" data-act="dlimg">PNG保存</button>
+            <span class="fsn-issue-shotnote"></span>
+            <button class="fsn-btn" data-act="close">閉じる</button>
+          </div>
+        </div>
+      </div>`);
+    root.appendChild(bg);
+    const note = bg.querySelector(".fsn-issue-shotnote");
+    const close = () => bg.remove();
+    bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
+    bg.querySelector('[data-act="close"]').addEventListener("click", close);
+
+    bg.querySelector('[data-act="copytitle"]').addEventListener("click", async () => {
+      try { await copyText(title); toast("タイトルをコピーしました"); }
+      catch { toast("コピーできませんでした"); }
+    });
+    bg.querySelector('[data-act="copybody"]').addEventListener("click", async () => {
+      try { await copyText(body); toast("本文をコピーしました"); }
+      catch { toast("コピーできませんでした"); }
+    });
+
+    // 画像コピー / PNG保存: 撮影中はモーダルを一時的に隠してページとピンを写す
+    async function withShot(handler, label) {
+      note.textContent = "撮影中…";
+      bg.style.visibility = "hidden";
+      let blob = null;
+      try { blob = await captureThreadShot(c); }
+      catch { blob = null; }
+      bg.style.visibility = "";
+      if (!blob) {
+        note.textContent = "";
+        return toast("スクショの自動取得に失敗しました。手動で添付してください");
+      }
+      note.textContent = "";
+      await handler(blob);
+      void label;
+    }
+    bg.querySelector('[data-act="copyimg"]').addEventListener("click", () =>
+      withShot(async (blob) => {
+        try { await copyImage(blob); toast("画像をコピーしました。GitHubでCtrl/Cmd+V"); }
+        catch {
+          downloadBlob(blob, `fusen-issue-${idx}.png`);
+          toast("画像コピー非対応のためPNGを保存しました");
+        }
+      })
+    );
+    bg.querySelector('[data-act="dlimg"]').addEventListener("click", () =>
+      withShot(async (blob) => {
+        downloadBlob(blob, `fusen-issue-${idx}.png`);
+        toast("PNGを保存しました");
+      })
+    );
   }
 
   // ---------- レビュー(承認)モーダル ----------
