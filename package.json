@@ -5,7 +5,7 @@
   "type": "module",
   "description": "社内向けWebサイトレビューツール — ライブサイトにピン留めコメント",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "start": "wrangler dev",
