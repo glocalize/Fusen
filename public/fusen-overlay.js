@@ -206,7 +206,103 @@
     return parts.length ? `${base} > ${parts.join(" > ")}` : base;
   }
 
+  // ---------- 作成時コンテキスト取得(対象ラベル + モーダル内か) ----------
+  // モーダルが閉じてアンカーが迷子になっても「何へのコメントだったか」を表示できるよう、
+  // クリック時点の対象要素から人間可読な手がかりを取っておく。
+  function contextOf(target) {
+    try {
+      if (!target || target.nodeType !== 1) return { ctx_label: null, ctx_modal: false, ctx_modal_label: null };
+      // 空白を畳んで先頭 max 文字。巨大な textContent でも重くならないよう先に粗く切る
+      const norm = (s, max) => String(s ?? "").slice(0, 2000).replace(/\s+/g, " ").trim().slice(0, max);
+      const attr = (node, name) => (node.getAttribute ? node.getAttribute(name) : null);
+
+      // 対象ラベル: aria-label → img の alt → title → textContent(先頭60字) → タグ名
+      let label =
+        norm(attr(target, "aria-label"), 120) ||
+        (target.tagName === "IMG" ? norm(attr(target, "alt"), 120) : "") ||
+        norm(attr(target, "title"), 120) ||
+        norm(target.textContent, 60) ||
+        (target.tagName ? target.tagName.toLowerCase() : "");
+
+      // モーダル判定(第一候補: セマンティクス)
+      let modalRoot = target.closest ? target.closest('dialog, [role="dialog"], [aria-modal="true"]') : null;
+      // 第二候補: 保守的ヒューリスティック
+      // position:fixed かつ z-index>=10 かつ class/id が modal|dialog|popup|drawer|sheet にマッチする祖先
+      if (!modalRoot) {
+        let cur = target;
+        while (cur && cur !== document.body && cur.nodeType === 1) {
+          if (cur.hasAttribute && cur.hasAttribute("data-fsn")) break; // Fusen自身のUIは対象外
+          const hint = `${attr(cur, "class") || ""} ${cur.id || ""}`;
+          if (/modal|dialog|popup|drawer|sheet/i.test(hint)) {
+            try {
+              const st = getComputedStyle(cur);
+              const z = parseInt(st.zIndex, 10);
+              if (st.position === "fixed" && !isNaN(z) && z >= 10) {
+                modalRoot = cur;
+                break;
+              }
+            } catch {}
+          }
+          cur = cur.parentElement;
+        }
+      }
+      if (modalRoot && modalRoot.closest && modalRoot.closest("[data-fsn]")) modalRoot = null;
+
+      // モーダルのラベル: aria-label → aria-labelledby の解決テキスト → 最初の見出し
+      let modalLabel = null;
+      if (modalRoot) {
+        modalLabel = norm(attr(modalRoot, "aria-label"), 120);
+        if (!modalLabel) {
+          const ids = String(attr(modalRoot, "aria-labelledby") || "").trim();
+          if (ids) {
+            const txt = ids
+              .split(/\s+/)
+              .map((i) => {
+                const n = document.getElementById(i);
+                return n ? n.textContent : "";
+              })
+              .join(" ");
+            modalLabel = norm(txt, 120);
+          }
+        }
+        if (!modalLabel) {
+          const h = modalRoot.querySelector("h1,h2,h3,h4,h5,h6,[role=heading]");
+          if (h) modalLabel = norm(h.textContent, 120);
+        }
+        modalLabel = modalLabel || null;
+      }
+
+      return { ctx_label: label || null, ctx_modal: !!modalRoot, ctx_modal_label: modalLabel };
+    } catch {
+      return { ctx_label: null, ctx_modal: false, ctx_modal_label: null };
+    }
+  }
+
+  // ---------- 遅延バックフィル(既存コメントのコンテキスト後付け) ----------
+  // ctx 未取得(ctx_modal == null)の既存ルートコメントは、selector が解決できた
+  // 最初のタイミングでコンテキストを取得してサーバーへ追記する。
+  // updatePositions は rAF で高頻度に走るため、コメントIDごとに1回だけ送る。
+  // 失敗しても静かに諦める(ユーザー操作起点ではないので toast は出さない)。
+  const ctxBackfillTried = new Set();
+  function maybeBackfillCtx(c, elm) {
+    try {
+      if (!elm || !c || c.parent_id || !c.selector) return;
+      if (c.ctx_modal != null) return; // 取得済み(true/false)は対象外
+      if (ctxBackfillTried.has(c.id)) return;
+      ctxBackfillTried.add(c.id);
+      const ctx = contextOf(elm);
+      apiCall(`/api/comments/${c.id}`, { method: "PATCH", body: JSON.stringify(ctx) })
+        .then((d) => {
+          const cur = comments.find((x) => x.id === c.id);
+          if (cur && d && d.comment) Object.assign(cur, d.comment);
+        })
+        .catch(() => {}); // リトライ嵐を防ぐため Set に入れたままにする
+    } catch {}
+  }
+
   // ---------- アンカー解決(ビューポート座標で返す) ----------
+  // lost: selector があるのに要素を見失っている状態(モーダルが閉じた等)。
+  // selector が元々 null の座標のみアンカーは「見失った」わけではないので lost:false。
   function resolveViewport(a) {
     if (a.selector) {
       try {
@@ -214,12 +310,13 @@
         if (elm) {
           const r = elm.getBoundingClientRect();
           if (r.width > 0 || r.height > 0) {
-            return { x: r.left + r.width * a.rx, y: r.top + r.height * a.ry, el: elm };
+            return { x: r.left + r.width * a.rx, y: r.top + r.height * a.ry, el: elm, lost: false };
           }
         }
       } catch {}
+      return { x: a.ax - scrollX, y: a.ay - scrollY, el: null, lost: true }; // 迷子: 要素が今は見つからない
     }
-    return { x: a.ax - scrollX, y: a.ay - scrollY, el: null }; // フォールバック: 保存時のページ絶対座標
+    return { x: a.ax - scrollX, y: a.ay - scrollY, el: null, lost: false }; // フォールバック: 保存時のページ絶対座標
   }
 
   // ---------- ハイライト ----------
@@ -237,6 +334,7 @@
   }
 
   // ---------- 位置更新ループ(スクロール・レイアウト変化に追従) ----------
+  const LOST_TITLE = "対象の要素が今は表示されていません(モーダル等が閉じている可能性があります)";
   let rafQueued = false;
   function updatePositions() {
     rafQueued = false;
@@ -246,6 +344,13 @@
       const p = resolveViewport(c);
       pin.style.left = p.x + "px";
       pin.style.top = p.y + "px";
+      // 迷子ピン: selector が解決できない間だけ見た目を変える(モーダルが再度開けば自動で通常表示に戻る)
+      if (pin.classList.contains("fsn-lost") !== !!p.lost) {
+        pin.classList.toggle("fsn-lost", !!p.lost);
+        if (p.lost) pin.title = LOST_TITLE;
+        else pin.removeAttribute("title");
+      }
+      if (!p.lost && p.el) maybeBackfillCtx(c, p.el); // ctx未取得の既存コメントを解決できた瞬間に補完
     }
     if (tempPinEl && tempAnchor) {
       const p = resolveViewport(tempAnchor);
@@ -256,6 +361,9 @@
       const p = popTrack();
       placePop(popEl, p.x, p.y);
       setHighlight(p.el);
+      // スレッド内の「対象が非表示」バッジも現在の解決状態に追従させる
+      const lostBadge = popEl.querySelector(".fsn-ctx-lost");
+      if (lostBadge) lostBadge.style.display = p.lost ? "flex" : "none";
     } else if (hoverHl) {
       setHighlight(hoverHl);
     } else {
@@ -395,9 +503,20 @@
         <div class="fsn-text">${esc(m.body)}</div>
       </div>`;
 
+    // 対象情報行(何にコメントしたか)。ctx はサーバー由来のため必ず esc() を通す
+    let ctxLine = "";
+    if (c.ctx_modal === true) {
+      ctxLine = `ダイアログ${c.ctx_modal_label ? `「${esc(c.ctx_modal_label)}」` : ""}内${c.ctx_label ? ` · 対象: ${esc(c.ctx_label)}` : ""}`;
+    } else if (c.ctx_label) {
+      ctxLine = `対象: ${esc(c.ctx_label)}`;
+    }
+    const lostNow = !!resolveViewport(c).lost;
+
     popEl = el(`
       <div class="fsn-pop" data-fsn>
         <div class="fsn-pop-head">${I("bubble", 14)} コメント #${idx} ${c.status === "resolved" ? "(解決済み)" : ""} <button class="fsn-x">${I("x", 14)}</button></div>
+        ${ctxLine ? `<div class="fsn-ctx">${I("pin", 12, 2.6)} <span>${ctxLine}</span></div>` : ""}
+        ${c.selector ? `<div class="fsn-ctx-lost"${lostNow ? "" : ' style="display:none"'}>${I("alert", 12, 2.6)} <span>対象が現在表示されていません(モーダルが閉じている可能性)</span></div>` : ""}
         <div class="fsn-pop-body">
           ${msgHtml(c, false)}
           ${reps.map((r) => msgHtml(r, true)).join("")}
@@ -520,6 +639,12 @@
       arr.forEach((c) => {
         const reps = repliesOf(c.id).length;
         const num = isCurrent ? pageRoots.findIndex((x) => x.id === c.id) + 1 : 0;
+        // 現在ページのコメントで対象要素を見失っているもの(モーダルが閉じている等)には控えめに警告を添える
+        const lost = isCurrent && !!resolveViewport(c).lost;
+        const subBits = [];
+        if (reps) subBits.push(`返信 ${reps}件`);
+        if (!isCurrent) subBits.push("クリックで移動");
+        if (lost) subBits.push(`<span class="fsn-sb-lost">${I("alert", 10, 2.8)} 対象が非表示</span>`);
         const item = el(`
           <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
             <div class="fsn-row1">
@@ -528,7 +653,8 @@
               <span class="fsn-sub">${timeAgo(c.created_at)}</span>
             </div>
             <div class="fsn-prev">${esc(c.body)}</div>
-            <div class="fsn-sub">${reps ? `返信 ${reps}件` : ""}${isCurrent ? "" : (reps ? "  ·  " : "") + "クリックで移動"}</div>
+            ${c.ctx_modal === true ? `<div class="fsn-sb-ctx">ダイアログ内${c.ctx_modal_label ? ": " + esc(c.ctx_modal_label) : ""}</div>` : ""}
+            <div class="fsn-sub">${subBits.join("  ·  ")}</div>
           </div>`);
         item.addEventListener("click", () => openFromSidebar(c));
         list.appendChild(item);
@@ -670,6 +796,10 @@
       rootBody: c.body,
       threadBlock,
       generatedAt: new Date().toISOString(),
+      // 作成時コンテキスト(あれば「対象: …」の行が入る)
+      ctxLabel: c.ctx_label || "",
+      ctxModal: c.ctx_modal === true,
+      ctxModalLabel: c.ctx_modal_label || "",
     });
 
     closePop();
@@ -893,6 +1023,9 @@
       ax: scrollX + e.clientX,
       ay: scrollY + e.clientY,
     };
+    // 作成時コンテキスト(対象ラベル・モーダル内か)も一緒に保存する。
+    // anchor ごと POST ボディへ展開されるので ctx_label / ctx_modal / ctx_modal_label が送られる
+    Object.assign(anchor, contextOf(target));
     hoverHl = null;
     openNewComment(anchor);
   });
