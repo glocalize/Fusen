@@ -85,6 +85,9 @@
   let popTrack = null; // 開いているポップオーバーの追従関数 () => {x,y,el}
   let tempPinEl = null;
   let tempAnchor = null;
+  // 新規コメントの撮影対象要素。anchor に DOM 要素を入れると POST 時の
+  // JSON.stringify が循環参照で落ちるため、モジュール変数で別渡しする。
+  let tempTargetEl = null;
   let hoverHl = null; // コメントモードのホバー対象
   const pinEls = new Map(); // comment.id -> pin要素
   const sbItemEls = new Map(); // comment.id -> サイドバー項目要素(現在ページのみ)。非表示バッジを反応的に更新するため
@@ -220,7 +223,118 @@
     return parts.length ? `${base} > ${parts.join(" > ")}` : base;
   }
 
+  // ---------- モーダルルート判定 ----------
+  // 対象要素を包むモーダル(ダイアログ・ドロワー等)のルート要素を返す。無ければ null。
+  // contextOf(コンテキスト保存)と captureShotFor(撮影領域の決定)で共用する。
+  function modalRootOf(target) {
+    try {
+      if (!target || target.nodeType !== 1) return null;
+      const attr = (node, name) => (node.getAttribute ? node.getAttribute(name) : null);
+      // 第一候補: セマンティクス
+      let modalRoot = target.closest ? target.closest('dialog, [role="dialog"], [aria-modal="true"]') : null;
+      // 第二候補: 保守的ヒューリスティック
+      // position:fixed かつ z-index>=10 かつ class/id が modal|dialog|popup|drawer|sheet にマッチする祖先
+      if (!modalRoot) {
+        let cur = target;
+        while (cur && cur !== document.body && cur.nodeType === 1) {
+          if (cur.hasAttribute && cur.hasAttribute("data-fsn")) break; // Fusen自身のUIは対象外
+          const hint = `${attr(cur, "class") || ""} ${cur.id || ""}`;
+          if (/modal|dialog|popup|drawer|sheet/i.test(hint)) {
+            try {
+              const st = getComputedStyle(cur);
+              const z = parseInt(st.zIndex, 10);
+              if (st.position === "fixed" && !isNaN(z) && z >= 10) {
+                modalRoot = cur;
+                break;
+              }
+            } catch {}
+          }
+          cur = cur.parentElement;
+        }
+      }
+      if (modalRoot && modalRoot.closest && modalRoot.closest("[data-fsn]")) modalRoot = null;
+      return modalRoot;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---------- 作成時コンテキスト取得(対象ラベル + モーダル内か) ----------
+  // モーダルが閉じてアンカーが迷子になっても「何へのコメントだったか」を表示できるよう、
+  // クリック時点の対象要素から人間可読な手がかりを取っておく。
+  function contextOf(target) {
+    try {
+      if (!target || target.nodeType !== 1) return { ctx_label: null, ctx_modal: false, ctx_modal_label: null };
+      // 空白を畳んで先頭 max 文字。巨大な textContent でも重くならないよう先に粗く切る
+      const norm = (s, max) => String(s ?? "").slice(0, 2000).replace(/\s+/g, " ").trim().slice(0, max);
+      const attr = (node, name) => (node.getAttribute ? node.getAttribute(name) : null);
+
+      // 対象ラベル: aria-label → img の alt → title → textContent(先頭60字) → タグ名
+      let label =
+        norm(attr(target, "aria-label"), 120) ||
+        (target.tagName === "IMG" ? norm(attr(target, "alt"), 120) : "") ||
+        norm(attr(target, "title"), 120) ||
+        norm(target.textContent, 60) ||
+        (target.tagName ? target.tagName.toLowerCase() : "");
+
+      // モーダル判定(セマンティクス + 保守的ヒューリスティック)
+      const modalRoot = modalRootOf(target);
+
+      // モーダルのラベル: aria-label → aria-labelledby の解決テキスト → 最初の見出し
+      let modalLabel = null;
+      if (modalRoot) {
+        modalLabel = norm(attr(modalRoot, "aria-label"), 120);
+        if (!modalLabel) {
+          const ids = String(attr(modalRoot, "aria-labelledby") || "").trim();
+          if (ids) {
+            const txt = ids
+              .split(/\s+/)
+              .map((i) => {
+                const n = document.getElementById(i);
+                return n ? n.textContent : "";
+              })
+              .join(" ");
+            modalLabel = norm(txt, 120);
+          }
+        }
+        if (!modalLabel) {
+          const h = modalRoot.querySelector("h1,h2,h3,h4,h5,h6,[role=heading]");
+          if (h) modalLabel = norm(h.textContent, 120);
+        }
+        modalLabel = modalLabel || null;
+      }
+
+      return { ctx_label: label || null, ctx_modal: !!modalRoot, ctx_modal_label: modalLabel };
+    } catch {
+      return { ctx_label: null, ctx_modal: false, ctx_modal_label: null };
+    }
+  }
+
+  // ---------- 遅延バックフィル(既存コメントのコンテキスト後付け) ----------
+  // ctx 未取得(ctx_modal == null)の既存ルートコメントは、selector が解決できた
+  // 最初のタイミングでコンテキストを取得してサーバーへ追記する。
+  // updatePositions は rAF で高頻度に走るため、コメントIDごとに1回だけ送る。
+  // 失敗しても静かに諦める(ユーザー操作起点ではないので toast は出さない)。
+  const ctxBackfillTried = new Set();
+  function maybeBackfillCtx(c, elm) {
+    try {
+      if (!elm || !c || c.parent_id || !c.selector) return;
+      if (c.ctx_modal != null) return; // 取得済み(true/false)は対象外
+      if (ctxBackfillTried.has(c.id)) return;
+      ctxBackfillTried.add(c.id);
+      const ctx = contextOf(elm);
+      apiCall(`/api/comments/${c.id}`, { method: "PATCH", body: JSON.stringify(ctx) })
+        .then((d) => {
+          const cur = comments.find((x) => x.id === c.id);
+          if (cur && d && d.comment) Object.assign(cur, d.comment);
+        })
+        .catch(() => {}); // リトライ嵐を防ぐため Set に入れたままにする
+    } catch {}
+  }
+
   // ---------- アンカー解決(ビューポート座標で返す) ----------
+  // orphaned: 対象要素が今DOMに無い/見つからない状態(モーダルを閉じた等)。座標フォールバックで
+  // 無理に表示すると無関係な場所に浮くため、呼び出し側でキャンバス上のピンを隠す。
   function resolveViewport(a) {
     if (a.selector) {
       try {
@@ -272,6 +386,7 @@
       pin.style.display = "";
       pin.style.left = p.x + "px";
       pin.style.top = p.y + "px";
+      if (p.el) maybeBackfillCtx(c, p.el); // ctx未取得の既存コメントを解決できた瞬間に補完
     }
     if (tempPinEl && tempAnchor) {
       const p = resolveViewport(tempAnchor);
@@ -343,6 +458,7 @@
     if (tempPinEl) tempPinEl.remove();
     tempPinEl = null;
     tempAnchor = null;
+    tempTargetEl = null;
     openThreadId = null;
     setHighlight(null);
   }
@@ -361,9 +477,10 @@
   }
 
   // 新規コメント入力
-  function openNewComment(anchor) {
+  function openNewComment(anchor, targetEl) {
     closePop();
     tempAnchor = anchor;
+    tempTargetEl = targetEl || null; // スクショ撮影用。closePop() が null に戻すため必ずこの位置で設定する
     tempPinEl = el(`<div class="fsn-pin fsn-temp"><span>${I("plus", 14, 3)}</span></div>`);
     pinsLayer.appendChild(tempPinEl);
 
@@ -389,6 +506,7 @@
     popEl.querySelector('[data-act="save"]').addEventListener("click", async () => {
       const body = ta.value.trim();
       if (!body) return toast("コメントを入力してください");
+      const shotTarget = tempTargetEl; // closePop() で消える前に確保
       try {
         const d = await apiCall(`/api/canvases/${CFG.canvasId}/comments`, {
           method: "POST",
@@ -399,6 +517,8 @@
         closePop();
         renderPins();
         toast("ペタッ!コメントを貼りました");
+        // 作成時スクリーンショット: fire-and-forget(UIをブロックしない。失敗しても静かに諦める)
+        if (d.comment && d.comment.id) captureShotFor(d.comment.id, shotTarget);
       } catch (e) {
         toast(e.message);
       }
@@ -422,9 +542,21 @@
         <div class="fsn-text">${esc(m.body)}</div>
       </div>`;
 
+    // 対象情報行(何にコメントしたか)。ctx はサーバー由来のため必ず esc() を通す
+    let ctxLine = "";
+    if (c.ctx_modal === true) {
+      ctxLine = `ダイアログ${c.ctx_modal_label ? `「${esc(c.ctx_modal_label)}」` : ""}内${c.ctx_label ? ` · 対象: ${esc(c.ctx_label)}` : ""}`;
+    } else if (c.ctx_label) {
+      ctxLine = `対象: ${esc(c.ctx_label)}`;
+    }
+    // 作成時スクリーンショット(同一オリジン・Cookie認証。表示できない環境では onerror でブロックごと消す)
+    const shotUrl = c.has_shot === true ? `${API}/api/comments/${encodeURIComponent(c.id)}/screenshot` : null;
+
     popEl = el(`
       <div class="fsn-pop" data-fsn>
         <div class="fsn-pop-head">${I("bubble", 14)} コメント #${idx} ${c.status === "resolved" ? "(解決済み)" : ""}${hidden ? ` <span class="fsn-pop-hidden">${I("eyeOff", 12)} 対象は非表示</span>` : ""} <button class="fsn-x">${I("x", 14)}</button></div>
+        ${ctxLine ? `<div class="fsn-ctx">${I("pin", 12, 2.6)} <span>${ctxLine}</span></div>` : ""}
+        ${shotUrl ? `<div class="fsn-shot" title="クリックで原寸表示"><img src="${esc(shotUrl)}" alt="作成時のスクリーンショット" loading="lazy"><div class="fsn-shot-cap">作成時のスクリーンショット</div></div>` : ""}
         <div class="fsn-pop-body">
           ${msgHtml(c, false)}
           ${reps.map((r) => msgHtml(r, true)).join("")}
@@ -444,6 +576,14 @@
     updatePositions();
 
     popEl.querySelector(".fsn-x").addEventListener("click", closePop);
+    // スクリーンショット: クリックで原寸を新規タブ表示。読み込めない環境では崩れないようブロックごと非表示
+    const shotBlock = popEl.querySelector(".fsn-shot");
+    if (shotBlock && shotUrl) {
+      shotBlock.querySelector("img").addEventListener("error", () => {
+        shotBlock.style.display = "none";
+      });
+      shotBlock.addEventListener("click", () => window.open(shotUrl, "_blank"));
+    }
     popEl.querySelector('[data-act="reply"]').addEventListener("click", async () => {
       const ta = popEl.querySelector("textarea");
       const body = ta.value.trim();
@@ -551,6 +691,9 @@
         // 現在ページの項目は「今は非表示」タグを常に埋め込んでおき、fsn-is-hidden クラスの
         // 付け外し(updatePositions が反応的に行う)で表示/非表示を切り替える。動的UI(モーダル等)
         // 上のコメントは、対象が閉じている間だけこのタグが点灯して「動的UI上にある」と示す。
+        const subBits = [];
+        if (reps) subBits.push(`返信 ${reps}件`);
+        if (!isCurrent) subBits.push("クリックで移動");
         const item = el(`
           <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
             <div class="fsn-row1">
@@ -560,7 +703,8 @@
               <span class="fsn-sub">${timeAgo(c.created_at)}</span>
             </div>
             <div class="fsn-prev">${esc(c.body)}</div>
-            <div class="fsn-sub">${reps ? `返信 ${reps}件` : ""}${isCurrent ? "" : (reps ? "  ·  " : "") + "クリックで移動"}</div>
+            ${c.ctx_modal === true ? `<div class="fsn-sb-ctx">ダイアログ内${c.ctx_modal_label ? ": " + esc(c.ctx_modal_label) : ""}</div>` : ""}
+            <div class="fsn-sub">${subBits.join("  ·  ")}</div>
           </div>`);
         item.addEventListener("click", () => openFromSidebar(c));
         if (isCurrent) sbItemEls.set(c.id, item);
@@ -690,6 +834,88 @@
     return await new Promise((res) => canvas.toBlob(res, "image/png"));
   }
 
+  // ---------- 作成時スクリーンショット(方針C: モーダルが閉じても見た目が残る) ----------
+  // コメント POST 成功直後に fire-and-forget で呼ばれる。撮れたら儲けもの:
+  // ロード失敗・描画例外・サイズ超過・4xx/5xx はすべて toast を出さず静かに諦める
+  // (コメント本体は既に成立している。サーバー未デプロイ環境でも壊れない)。
+  async function captureShotFor(commentId, targetEl) {
+    try {
+      if (!commentId || !targetEl || targetEl.nodeType !== 1 || !targetEl.isConnected) return;
+      const h2c = await loadHtml2Canvas();
+      if (!targetEl.isConnected) return; // ロード待ちの間に消えたら諦める
+
+      // 撮影領域(ページ絶対座標):
+      // モーダル内クリックならモーダルルートの矩形、そうでなければ要素の矩形 + 周囲80px
+      const modalRoot = modalRootOf(targetEl);
+      const baseEl = modalRoot || targetEl;
+      const r = baseEl.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return; // 非表示要素は撮っても意味がない
+      const PAD = modalRoot ? 0 : 80;
+      let x = r.left + scrollX - PAD;
+      let y = r.top + scrollY - PAD;
+      let w = r.width + PAD * 2;
+      let h = r.height + PAD * 2;
+      // 最小 320x200 を中心を保ったまま確保
+      const MIN_W = 320, MIN_H = 200;
+      if (w < MIN_W) { x -= (MIN_W - w) / 2; w = MIN_W; }
+      if (h < MIN_H) { y -= (MIN_H - h) / 2; h = MIN_H; }
+      // document の範囲にクランプ(先にサイズを縮めてから位置を寄せる。巨大モーダルでも負座標にならない)
+      const docW = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
+      const docH = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+      w = Math.min(w, docW);
+      h = Math.min(h, docH);
+      x = Math.round(Math.min(Math.max(0, x), docW - w));
+      y = Math.round(Math.min(Math.max(0, y), docH - h));
+      w = Math.round(w);
+      h = Math.round(h);
+
+      // Fusen自身のUI(data-fsn)は全て写さない(作成直後でピンはまだ無いので全除外でよい)
+      const ignoreElements = (elm) =>
+        elm && elm.nodeType === 1 && elm.hasAttribute && elm.hasAttribute("data-fsn");
+      const canvas = await h2c(document.body, {
+        backgroundColor: "#ffffff",
+        scale: 1,
+        useCORS: true,
+        logging: false,
+        x, y, width: w, height: h,
+        windowWidth: document.documentElement.scrollWidth,
+        windowHeight: document.documentElement.scrollHeight,
+        ignoreElements,
+      });
+      if (!canvas || !canvas.width || !canvas.height || isBlankCanvas(canvas)) return;
+
+      // JPEG化: 幅 maxW 超は白背景キャンバスで縮小してから toDataURL
+      const encode = (maxW, quality) => {
+        let src = canvas;
+        if (canvas.width > maxW) {
+          const c2 = document.createElement("canvas");
+          c2.width = maxW;
+          c2.height = Math.max(1, Math.round((canvas.height * maxW) / canvas.width));
+          const ctx = c2.getContext("2d");
+          ctx.fillStyle = "#ffffff"; // JPEGは透過不可のため白で埋める
+          ctx.fillRect(0, 0, c2.width, c2.height);
+          ctx.drawImage(canvas, 0, 0, c2.width, c2.height);
+          src = c2;
+        }
+        return src.toDataURL("image/jpeg", quality);
+      };
+      // base64 部分 40万文字(≒300KB)がサーバー上限。超えたら 480px/品質0.6 で1回だけ再試行
+      const LIMIT = 400000;
+      const b64len = (u) => u.length - (u.indexOf(",") + 1);
+      let dataUrl = encode(640, 0.75);
+      if (b64len(dataUrl) > LIMIT) dataUrl = encode(480, 0.6);
+      if (b64len(dataUrl) > LIMIT) return;
+
+      await apiCall(`/api/comments/${encodeURIComponent(commentId)}/screenshot`, {
+        method: "PUT",
+        body: JSON.stringify({ data_url: dataUrl }),
+      });
+      // ローカル状態に反映(次回 openThread からサムネイルが出る)
+      const cur = comments.find((c) => c.id === commentId);
+      if (cur) cur.has_shot = true;
+    } catch {} // 全て静かに諦める(対象ページのDOM/グローバルは触っていない)
+  }
+
   async function openIssuePanel(id) {
     const c = comments.find((x) => x.id === id);
     if (!c) return;
@@ -712,6 +938,10 @@
       rootBody: c.body,
       threadBlock,
       generatedAt: new Date().toISOString(),
+      // 作成時コンテキスト(あれば「対象: …」の行が入る)
+      ctxLabel: c.ctx_label || "",
+      ctxModal: c.ctx_modal === true,
+      ctxModalLabel: c.ctx_modal_label || "",
     });
 
     closePop();
@@ -935,8 +1165,11 @@
       ax: scrollX + e.clientX,
       ay: scrollY + e.clientY,
     };
+    // 作成時コンテキスト(対象ラベル・モーダル内か)も一緒に保存する。
+    // anchor ごと POST ボディへ展開されるので ctx_label / ctx_modal / ctx_modal_label が送られる
+    Object.assign(anchor, contextOf(target));
     hoverHl = null;
-    openNewComment(anchor);
+    openNewComment(anchor, target); // 第2引数はスクショ撮影用(anchor には DOM を入れない)
   });
 
   // ---------- ブラウズモードのリンク制御 ----------

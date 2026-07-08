@@ -1,7 +1,7 @@
 // セキュリティ回帰テスト。監査レポート(docs/security-audit.md)の各修正が効いていることを検証する。
 // 実行: node --experimental-sqlite scripts/test-security.mjs
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import app from "../src/index.js";
 import { injectOverlay } from "../src/proxy.js";
 import { assertPublicUrl, isPrivateIPv4, isPrivateIPv6, safeFetch, BlockedAddressError } from "../lib/safefetch.js";
@@ -36,7 +36,12 @@ function d1(sq) {
 const here = (p) => new URL(p, import.meta.url);
 const sq = new DatabaseSync(":memory:");
 sq.exec("PRAGMA foreign_keys = ON;");
-sq.exec(readFileSync(here("../migrations/0001_init.sql"), "utf8"));
+// migrations/ 配下の *.sql をファイル名順(0001_..., 0002_...)に全部連結して適用する。
+{
+  const dir = here("../migrations/");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
+  for (const f of files) sq.exec(readFileSync(new URL(f, dir), "utf8"));
+}
 // git 管理外の seed.sql ではなく合成フィクスチャから seed を組み立てる(hermetic)。
 sq.exec(buildSeedSql(JSON.parse(readFileSync(here("../test/fixtures/db.json"), "utf8"))));
 

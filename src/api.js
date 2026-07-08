@@ -208,6 +208,9 @@ api.post("/canvases/:id/comments", requireUser, async (c) => {
   const bodyText = String(b?.body || "").trim().slice(0, 4000);
   if (!bodyText) return c.json({ error: "コメントを入力してください" }, 400);
   const user = c.get("user");
+  // コメント対象のコンテキスト(#モーダルコメント問題対応): ctx_modal が無い(boolean でない)
+  // 場合は「未取得」として扱い、ラベル類も null にする(部分保存を避ける)。
+  const ctx = normalizeCtx(b);
   const m = {
     id: db.nid("m_"),
     canvas_id: canvas.id,
@@ -225,10 +228,27 @@ api.post("/canvases/:id/comments", requireUser, async (c) => {
     parent_id: b?.parent_id || null,
     resolved_by: null,
     created_at: new Date().toISOString(),
+    ctx_label: ctx.ctx_label,
+    ctx_modal: ctx.ctx_modal,
+    ctx_modal_label: ctx.ctx_modal_label,
   };
   const saved = await db.addComment(c.env.DB, m);
   return c.json({ comment: saved });
 });
+
+// コメント対象コンテキストのバリデーション/正規化(POST/PATCH共通)。
+// ctx_modal が boolean でなければ「未取得」扱いとし、ラベル類も null にする(部分保存を避ける)。
+function normalizeCtx(b) {
+  const ctx_modal = typeof b?.ctx_modal === "boolean" ? b.ctx_modal : null;
+  if (ctx_modal === null) return { ctx_label: null, ctx_modal: null, ctx_modal_label: null };
+  const label = String(b?.ctx_label || "").trim().slice(0, 120);
+  const modalLabel = String(b?.ctx_modal_label || "").trim().slice(0, 120);
+  return {
+    ctx_label: label || null,
+    ctx_modal,
+    ctx_modal_label: modalLabel || null,
+  };
+}
 
 api.patch("/comments/:id", requireUser, async (c) => {
   const m = await db.getComment(c.env.DB, c.req.param("id"));
@@ -236,13 +256,22 @@ api.patch("/comments/:id", requireUser, async (c) => {
   // 解決/再オープンはそのキャンバスにアクセスできる人のみ(#3 IDOR)
   if (!canAccessCanvas(c.get("user"), m.canvas_id)) return c.json({ error: "権限がありません" }, 403);
   const b = await c.req.json().catch(() => ({}));
+  let current = m;
   if (b?.status && ["active", "resolved"].includes(b.status)) {
     const user = c.get("user");
     const resolvedBy = b.status === "resolved" ? user.name : null;
-    const updated = await db.setCommentStatus(c.env.DB, m.id, b.status, resolvedBy);
-    return c.json({ comment: updated });
+    current = await db.setCommentStatus(c.env.DB, m.id, b.status, resolvedBy);
   }
-  return c.json({ comment: m });
+  // コンテキストの遅延バックフィル: モーダル再表示時などにクライアントが追記する。
+  // 未取得(ctx_modal IS NULL)かつ selector がある(=アンカー可能な)コメントのみ対象。
+  // 条件を満たさない場合は無視(エラーにしない)。status 更新と同時に来ても両方処理する。
+  if (typeof b?.ctx_modal === "boolean") {
+    if (current.ctx_modal === null && current.selector != null) {
+      const ctx = normalizeCtx(b);
+      current = await db.setCommentContext(c.env.DB, m.id, ctx);
+    }
+  }
+  return c.json({ comment: current });
 });
 
 api.delete("/comments/:id", requireUser, async (c) => {
@@ -254,6 +283,48 @@ api.delete("/comments/:id", requireUser, async (c) => {
   const ok = await db.deleteCommentCascade(c.env.DB, m.id);
   if (!ok) return c.json({ error: "コメントが見つかりません" }, 404);
   return c.json({ ok: true });
+});
+
+// ---- コメント作成時スクリーンショット ----
+// data:URL 全体(mime + base64本体)の厳格な形式チェック。許容mimeはJPEG/PNG/WebPのみ。
+const DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/;
+const MAX_SHOT_B64 = 400_000; // base64本体の最大文字数(≒300KB相当のサムネイル想定)
+
+api.put("/comments/:id/screenshot", requireUser, async (c) => {
+  const m = await db.getComment(c.env.DB, c.req.param("id"));
+  if (!m) return c.json({ error: "コメントが見つかりません" }, 404);
+  if (!canAccessCanvas(c.get("user"), m.canvas_id)) return c.json({ error: "このキャンバスにはアクセスできません" }, 403);
+  // 返信スレッドにはスクリーンショットの概念が無い(親コメントの作成時コンテキストとして保存する)
+  if (m.parent_id != null) return c.json({ error: "返信にはスクリーンショットを保存できません" }, 400);
+  const b = await c.req.json().catch(() => ({}));
+  const dataUrl = String(b?.data_url || "");
+  const mmatch = dataUrl.match(DATA_URL_RE);
+  if (!mmatch) return c.json({ error: "画像データの形式が不正です" }, 400);
+  const [, mime, b64] = mmatch;
+  if (b64.length > MAX_SHOT_B64) return c.json({ error: "画像が大きすぎます" }, 413);
+  const inserted = await db.addCommentShot(c.env.DB, {
+    comment_id: m.id,
+    mime: `image/${mime}`,
+    data_b64: b64,
+    created_at: new Date().toISOString(),
+  });
+  if (!inserted) return c.json({ ok: true, existing: true });
+  return c.json({ ok: true });
+});
+
+api.get("/comments/:id/screenshot", requireUser, async (c) => {
+  const m = await db.getComment(c.env.DB, c.req.param("id"));
+  if (!m) return c.json({ error: "コメントが見つかりません" }, 404);
+  if (!canAccessCanvas(c.get("user"), m.canvas_id)) return c.json({ error: "このキャンバスにはアクセスできません" }, 403);
+  const shot = await db.getCommentShot(c.env.DB, m.id);
+  if (!shot) return c.json({ error: "スクリーンショットがありません" }, 404);
+  // base64 → バイナリへデコードして画像として配信(private: レビュー参加者以外に見せない想定)
+  const bin = atob(shot.data_b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, {
+    headers: { "content-type": shot.mime, "cache-control": "private, max-age=3600" },
+  });
 });
 
 // ---- レビュー(承認フロー) ----

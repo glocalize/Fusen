@@ -2,7 +2,7 @@
 // ASSETS / fetch のモックを渡して、実際のリクエストでルートを叩く。
 // 実行: node --experimental-sqlite scripts/test-routes.mjs
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import app from "../src/index.js";
 import { basicAuthHeader, isSpaHost } from "../src/proxy.js";
 import { buildSeedSql } from "./seed-sql.mjs";
@@ -36,7 +36,12 @@ const here = (p) => new URL(p, import.meta.url);
 const fixture = JSON.parse(readFileSync(here("../test/fixtures/db.json"), "utf8"));
 const sq = new DatabaseSync(":memory:");
 sq.exec("PRAGMA foreign_keys = ON;");
-sq.exec(readFileSync(here("../migrations/0001_init.sql"), "utf8"));
+// migrations/ 配下の *.sql をファイル名順(0001_..., 0002_...)に全部連結して適用する。
+{
+  const dir = here("../migrations/");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
+  for (const f of files) sq.exec(readFileSync(new URL(f, dir), "utf8"));
+}
 sq.exec(buildSeedSql(fixture)); // フィクスチャの4キャンバス等
 
 // ASSETS モック(静的配信)。リクエストパスを反映した HTML を返す。
@@ -135,6 +140,102 @@ assert(j.ok === true, "コメント削除 ok");
 r = await req(`/api/canvases/${cid}/comments`, auth());
 j = await r.json();
 assert(j.comments.length === 0, "親削除で返信も消える");
+
+// 12.5) コメントのコンテキスト(#モーダルコメント問題対応)
+// (a) POST時にctxを付けると保存されて返る
+r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "モーダルのコメント", page: "https://example.com/", selector: "div.modal button", ctx_label: "保存ボタン", ctx_modal: true, ctx_modal_label: "設定" }));
+j = await r.json();
+const ctxMid = j.comment.id;
+assert(j.comment.ctx_label === "保存ボタン" && j.comment.ctx_modal === true && j.comment.ctx_modal_label === "設定", "POST comments: ctxフィールドが保存されて返る");
+
+// (b) ctxなしPOST → PATCHでctxバックフィルできる
+r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "後付け対象", page: "https://example.com/", selector: "h2.title" }));
+j = await r.json();
+const noCtxMid = j.comment.id;
+assert(j.comment.ctx_modal === null, "POST comments: ctxなしはctx_modal:nullで作られる");
+r = await req(`/api/comments/${noCtxMid}`, { method: "PATCH", headers: { Cookie: cookie, "content-type": "application/json" }, body: JSON.stringify({ ctx_label: "後付けラベル", ctx_modal: true, ctx_modal_label: "後付けモーダル" }) });
+j = await r.json();
+assert(j.comment.ctx_modal === true && j.comment.ctx_label === "後付けラベル" && j.comment.ctx_modal_label === "後付けモーダル", "PATCH comments: ctxなしコメントへのバックフィルが反映される");
+
+// (c) ctx取得済みコメントへのPATCHバックフィルは無視される(値が変わらない)
+r = await req(`/api/comments/${ctxMid}`, { method: "PATCH", headers: { Cookie: cookie, "content-type": "application/json" }, body: JSON.stringify({ ctx_label: "上書き試行", ctx_modal: false, ctx_modal_label: "上書き試行" }) });
+j = await r.json();
+assert(j.comment.ctx_modal === true && j.comment.ctx_label === "保存ボタン", "PATCH comments: ctx取得済みへのバックフィルは無視される");
+
+// (d) 120字超のctx_labelが切り詰められる
+const longLabel = "あ".repeat(150);
+r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "長いラベル", page: "https://example.com/", selector: "p.long", ctx_label: longLabel, ctx_modal: true, ctx_modal_label: longLabel }));
+j = await r.json();
+assert(j.comment.ctx_label.length === 120 && j.comment.ctx_modal_label.length === 120, "POST comments: 120字超のctx_labelが切り詰められる");
+
+// 12.6) コメント作成時スクリーンショット
+{
+  const putReq = (path, obj, ck = cookie) => req(path, { method: "PUT", headers: { Cookie: ck, "content-type": "application/json" }, body: JSON.stringify(obj) });
+  const smallB64 = "QUFBQUFBQUFBQUFB"; // 適当なbase64本体(内容は検証しない)
+  const dataUrl = `data:image/jpeg;base64,${smallB64}`;
+
+  r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "スクショ対象", page: "https://example.com/", selector: "h1" }));
+  j = await r.json();
+  const shotMid = j.comment.id;
+  assert(j.comment.has_shot === false, "コメント作成直後は has_shot: false");
+
+  // PUT → GET 往復(content-type と body が一致)
+  r = await putReq(`/api/comments/${shotMid}/screenshot`, { data_url: dataUrl });
+  j = await r.json();
+  assert(r.status === 200 && j.ok === true && !j.existing, "PUT screenshot: 新規保存は {ok:true}");
+  r = await req(`/api/comments/${shotMid}/screenshot`, auth());
+  const gotBytes = new Uint8Array(await r.arrayBuffer());
+  const expectedBytes = Uint8Array.from(atob(smallB64), (ch) => ch.charCodeAt(0));
+  assert(r.status === 200 && r.headers.get("content-type") === "image/jpeg", "GET screenshot: content-typeが保存したmimeと一致");
+  assert(gotBytes.length === expectedBytes.length && gotBytes.every((v, i) => v === expectedBytes[i]), "GET screenshot: bodyが保存したデータと一致");
+  assert(r.headers.get("cache-control") === "private, max-age=3600", "GET screenshot: cache-controlヘッダ");
+
+  // listComments 応答に has_shot が出る
+  r = await req(`/api/canvases/${cid}/comments`, auth());
+  j = await r.json();
+  const listedShot = j.comments.find((x) => x.id === shotMid);
+  assert(listedShot && listedShot.has_shot === true, "listComments応答: 保存後は has_shot: true");
+
+  // 既存ありのPUTが {ok:true, existing:true}
+  r = await putReq(`/api/comments/${shotMid}/screenshot`, { data_url: `data:image/png;base64,${smallB64}` });
+  j = await r.json();
+  assert(r.status === 200 && j.ok === true && j.existing === true, "PUT screenshot: 既存ありは {ok:true, existing:true}");
+
+  // shot なし GET 404
+  r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "shotなし", page: "https://example.com/" }));
+  const noShotMid = (await r.json()).comment.id;
+  r = await req(`/api/comments/${noShotMid}/screenshot`, auth());
+  j = await r.json();
+  assert(r.status === 404 && j.error, "GET screenshot: shotが無ければ404");
+
+  // 返信への PUT 400
+  r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "返信です", parent_id: shotMid }));
+  const replyMid = (await r.json()).comment.id;
+  r = await putReq(`/api/comments/${replyMid}/screenshot`, { data_url: dataUrl });
+  assert(r.status === 400, "PUT screenshot: 返信には保存不可(400)");
+
+  // data_url 形式不正 400
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: "data:text/plain;base64,QUFB" });
+  assert(r.status === 400, "PUT screenshot: mimeが不正なら400");
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: "not-a-data-url" });
+  assert(r.status === 400, "PUT screenshot: data:形式でなければ400");
+
+  // 413 サイズ超過
+  const hugeB64 = "A".repeat(400_001);
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: `data:image/jpeg;base64,${hugeB64}` });
+  j = await r.json();
+  assert(r.status === 413 && j.error, "PUT screenshot: 400,000字超は413");
+
+  // 別キャンバス束縛ゲストの PUT/GET は 403
+  const otherCanvasResp = await (await req("/api/canvases", authJ({ url: "shots-other.example.com", title: "別キャンバス" }))).json();
+  const otherToken = otherCanvasResp.canvas.share_token;
+  r = await req("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "スクショゲスト", guest: true, token: otherToken }) });
+  const guestCookie = (r.headers.get("set-cookie") || "").split(";")[0];
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: dataUrl }, guestCookie);
+  assert(r.status === 403, "PUT screenshot: 別キャンバス束縛ゲストは403");
+  r = await req(`/api/comments/${shotMid}/screenshot`, { headers: { Cookie: guestCookie } });
+  assert(r.status === 403, "GET screenshot: 別キャンバス束縛ゲストは403");
+}
 
 // 13) レビュー
 r = await req(`/api/canvases/${cid}/reviews`, authJ({ verdict: "approved", comment: "OK" }));

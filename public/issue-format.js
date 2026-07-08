@@ -38,6 +38,8 @@
   }
 
   // Issue 本文 Markdown(仕様 v0.2 の既定テンプレート)。
+  // ctxLabel / ctxModal / ctxModalLabel は任意(作成時コンテキスト)。
+  // ctxLabel があるときだけ「- 対象: …」の行が入り、モーダル内ならダイアログ名を添える。
   function buildIssueBody(opt) {
     const {
       canvasTitle,
@@ -49,7 +51,13 @@
       rootBody,
       threadBlock,
       generatedAt,
+      ctxLabel,
+      ctxModal,
+      ctxModalLabel,
     } = opt;
+    const ctxLines = ctxLabel
+      ? [`- 対象: ${ctxLabel}${ctxModal ? `（ダイアログ${ctxModalLabel ? `「${ctxModalLabel}」` : ""}内）` : ""}`]
+      : [];
     return [
       "## 概要",
       rootBody,
@@ -58,6 +66,7 @@
       `- キャンバス: ${canvasTitle}`,
       `- ページ: ${pageUrl}`,
       "- 要素: `" + (selector || "(セレクタなし)") + "`",
+      ...ctxLines,
       `- ピン: #${pinNo}（${statusLabel(status)}）`,
       `- Fusenで開く: ${deepLink}`,
       "",

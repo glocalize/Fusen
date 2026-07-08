@@ -1,7 +1,7 @@
 // lib/db-d1.js の検証。Node 22 内蔵 node:sqlite で D1 バインディングを模擬する。
 // 実行: node --experimental-sqlite scripts/test-d1.mjs
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import * as q from "../lib/db-d1.js";
 import { buildSeedSql } from "./seed-sql.mjs";
 
@@ -33,7 +33,13 @@ function d1(sq) {
 }
 
 const here = (p) => new URL(p, import.meta.url);
-const schema = readFileSync(here("../migrations/0001_init.sql"), "utf8");
+// migrations/ 配下の *.sql をファイル名順(0001_..., 0002_...)に全部連結して適用する。
+function loadSchema() {
+  const dir = here("../migrations/");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
+  return files.map((f) => readFileSync(new URL(f, dir), "utf8")).join("\n");
+}
+const schema = loadSchema();
 const now = () => new Date().toISOString();
 
 // ============ Part 1: db-d1.js の関数を実行して検証 ============
@@ -84,6 +90,76 @@ assert(c2.archived === true && c2.title === "改名", "updateCanvas(archived/tit
 assert((await q.listCanvases(DB, false)).length === 0, "listCanvases(false) はアーカイブ除外");
 assert((await q.listCanvases(DB, true)).length === 1, "listCanvases(true) はアーカイブのみ");
 assert((await q.getCanvasByToken(DB, "s_t")).id === "c_t", "getCanvasByToken");
+
+// ---- コメントのコンテキスト(#モーダルコメント問題対応) ----
+const mCtxA = await q.addComment(DB, {
+  id: "mctxA", canvas_id: "c_t", page: "https://ex.com/", selector: "div.modal button",
+  rx: 0, ry: 0, ax: 0, ay: 0, body: "モーダルのコメント", author: "テスト", author_id: "u_t",
+  guest: false, status: "active", parent_id: null, created_at: now(),
+  ctx_label: "保存ボタン", ctx_modal: true, ctx_modal_label: "設定",
+});
+assert(
+  mCtxA.ctx_modal === true && mCtxA.ctx_label === "保存ボタン" && mCtxA.ctx_modal_label === "設定",
+  "addComment: ctx_label/ctx_modal(true)/ctx_modal_label を渡すと boolean で返る"
+);
+
+const mCtxB = await q.addComment(DB, {
+  id: "mctxB", canvas_id: "c_t", page: "https://ex.com/", selector: "h1",
+  rx: 0, ry: 0, ax: 0, ay: 0, body: "通常コメント", author: "テスト", author_id: "u_t",
+  guest: false, status: "active", parent_id: null, created_at: now(), ctx_modal: null,
+});
+assert(mCtxB.ctx_modal === null, "addComment: ctx_modal:null で作ったコメントは null で返る");
+
+const backfilled = await q.setCommentContext(DB, "mctxB", { ctx_label: "後付けラベル", ctx_modal: true, ctx_modal_label: "後付けモーダル" });
+assert(
+  backfilled.ctx_modal === true && backfilled.ctx_label === "後付けラベル" && backfilled.ctx_modal_label === "後付けモーダル",
+  "setCommentContext: ctx_modal IS NULL のときは反映される"
+);
+
+const notOverwritten = await q.setCommentContext(DB, "mctxB", { ctx_label: "上書き試行", ctx_modal: false, ctx_modal_label: "上書き試行モーダル" });
+assert(
+  notOverwritten.ctx_modal === true && notOverwritten.ctx_label === "後付けラベル",
+  "setCommentContext: 取得済み(ctx_modal IS NOT NULL)は2回目の呼び出しで上書きされない"
+);
+
+// ---- コメントのスクリーンショット(comment_shots) ----
+{
+  const shotOwner = await q.addComment(DB, {
+    id: "mshot", canvas_id: "c_t", page: "https://ex.com/", selector: "h1",
+    rx: 0, ry: 0, ax: 0, ay: 0, body: "スクショ対象", author: "テスト", author_id: "u_t",
+    guest: false, status: "active", parent_id: null, created_at: now(),
+  });
+  assert(shotOwner.has_shot === false, "addComment: 直後は has_shot が false");
+
+  const inserted1 = await q.addCommentShot(DB, { comment_id: "mshot", mime: "image/jpeg", data_b64: "AAAA", created_at: now() });
+  assert(inserted1 === true, "addCommentShot: 初回挿入は true");
+  const inserted2 = await q.addCommentShot(DB, { comment_id: "mshot", mime: "image/png", data_b64: "BBBB", created_at: now() });
+  assert(inserted2 === false, "addCommentShot: 2回目(冪等)は false");
+
+  const shot = await q.getCommentShot(DB, "mshot");
+  assert(shot && shot.mime === "image/jpeg" && shot.data_b64 === "AAAA", "getCommentShot: first-writer-wins の内容が返る(2回目で上書きされない)");
+  assert((await q.getCommentShot(DB, "no-such-comment")) === null, "getCommentShot: 無い場合は null");
+
+  const withShot = await q.getComment(DB, "mshot");
+  assert(withShot.has_shot === true, "getComment: shot があると has_shot が true");
+  const listed = await q.listComments(DB, "c_t");
+  const listedShot = listed.find((x) => x.id === "mshot");
+  assert(listedShot.has_shot === true, "listComments: has_shot が boolean(true)で載る");
+  assert(typeof listedShot.has_shot === "boolean" && listed.every((x) => typeof x.has_shot === "boolean"), "listComments: 全件で has_shot が boolean");
+
+  // 返信にも shot を付けて、親削除で両方消えることを確認
+  await q.addComment(DB, {
+    id: "mshotReply", canvas_id: "c_t", page: "https://ex.com/", selector: null,
+    rx: 0, ry: 0, ax: 0, ay: 0, body: "返信", author: "テスト", author_id: "u_t",
+    guest: false, status: "active", parent_id: "mshot", created_at: now(),
+  });
+  await q.addCommentShot(DB, { comment_id: "mshotReply", mime: "image/jpeg", data_b64: "CCCC", created_at: now() });
+  assert((await q.getCommentShot(DB, "mshotReply")) !== null, "返信にも shot が保存できる");
+
+  await q.deleteCommentCascade(DB, "mshot");
+  assert((await q.getCommentShot(DB, "mshot")) === null, "deleteCommentCascade: 本体の shot も消える");
+  assert((await q.getCommentShot(DB, "mshotReply")) === null, "deleteCommentCascade: 返信の shot も連鎖で消える");
+}
 
 // ============ Part 2: データ移行(buildSeedSql)の件数/整合性 ============
 // git 管理外の実データではなく合成フィクスチャで検証する(hermetic)。
