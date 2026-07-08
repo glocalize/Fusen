@@ -168,6 +168,75 @@ r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "長いラベル", 
 j = await r.json();
 assert(j.comment.ctx_label.length === 120 && j.comment.ctx_modal_label.length === 120, "POST comments: 120字超のctx_labelが切り詰められる");
 
+// 12.6) コメント作成時スクリーンショット
+{
+  const putReq = (path, obj, ck = cookie) => req(path, { method: "PUT", headers: { Cookie: ck, "content-type": "application/json" }, body: JSON.stringify(obj) });
+  const smallB64 = "QUFBQUFBQUFBQUFB"; // 適当なbase64本体(内容は検証しない)
+  const dataUrl = `data:image/jpeg;base64,${smallB64}`;
+
+  r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "スクショ対象", page: "https://example.com/", selector: "h1" }));
+  j = await r.json();
+  const shotMid = j.comment.id;
+  assert(j.comment.has_shot === false, "コメント作成直後は has_shot: false");
+
+  // PUT → GET 往復(content-type と body が一致)
+  r = await putReq(`/api/comments/${shotMid}/screenshot`, { data_url: dataUrl });
+  j = await r.json();
+  assert(r.status === 200 && j.ok === true && !j.existing, "PUT screenshot: 新規保存は {ok:true}");
+  r = await req(`/api/comments/${shotMid}/screenshot`, auth());
+  const gotBytes = new Uint8Array(await r.arrayBuffer());
+  const expectedBytes = Uint8Array.from(atob(smallB64), (ch) => ch.charCodeAt(0));
+  assert(r.status === 200 && r.headers.get("content-type") === "image/jpeg", "GET screenshot: content-typeが保存したmimeと一致");
+  assert(gotBytes.length === expectedBytes.length && gotBytes.every((v, i) => v === expectedBytes[i]), "GET screenshot: bodyが保存したデータと一致");
+  assert(r.headers.get("cache-control") === "private, max-age=3600", "GET screenshot: cache-controlヘッダ");
+
+  // listComments 応答に has_shot が出る
+  r = await req(`/api/canvases/${cid}/comments`, auth());
+  j = await r.json();
+  const listedShot = j.comments.find((x) => x.id === shotMid);
+  assert(listedShot && listedShot.has_shot === true, "listComments応答: 保存後は has_shot: true");
+
+  // 既存ありのPUTが {ok:true, existing:true}
+  r = await putReq(`/api/comments/${shotMid}/screenshot`, { data_url: `data:image/png;base64,${smallB64}` });
+  j = await r.json();
+  assert(r.status === 200 && j.ok === true && j.existing === true, "PUT screenshot: 既存ありは {ok:true, existing:true}");
+
+  // shot なし GET 404
+  r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "shotなし", page: "https://example.com/" }));
+  const noShotMid = (await r.json()).comment.id;
+  r = await req(`/api/comments/${noShotMid}/screenshot`, auth());
+  j = await r.json();
+  assert(r.status === 404 && j.error, "GET screenshot: shotが無ければ404");
+
+  // 返信への PUT 400
+  r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "返信です", parent_id: shotMid }));
+  const replyMid = (await r.json()).comment.id;
+  r = await putReq(`/api/comments/${replyMid}/screenshot`, { data_url: dataUrl });
+  assert(r.status === 400, "PUT screenshot: 返信には保存不可(400)");
+
+  // data_url 形式不正 400
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: "data:text/plain;base64,QUFB" });
+  assert(r.status === 400, "PUT screenshot: mimeが不正なら400");
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: "not-a-data-url" });
+  assert(r.status === 400, "PUT screenshot: data:形式でなければ400");
+
+  // 413 サイズ超過
+  const hugeB64 = "A".repeat(400_001);
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: `data:image/jpeg;base64,${hugeB64}` });
+  j = await r.json();
+  assert(r.status === 413 && j.error, "PUT screenshot: 400,000字超は413");
+
+  // 別キャンバス束縛ゲストの PUT/GET は 403
+  const otherCanvasResp = await (await req("/api/canvases", authJ({ url: "shots-other.example.com", title: "別キャンバス" }))).json();
+  const otherToken = otherCanvasResp.canvas.share_token;
+  r = await req("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "スクショゲスト", guest: true, token: otherToken }) });
+  const guestCookie = (r.headers.get("set-cookie") || "").split(";")[0];
+  r = await putReq(`/api/comments/${noShotMid}/screenshot`, { data_url: dataUrl }, guestCookie);
+  assert(r.status === 403, "PUT screenshot: 別キャンバス束縛ゲストは403");
+  r = await req(`/api/comments/${shotMid}/screenshot`, { headers: { Cookie: guestCookie } });
+  assert(r.status === 403, "GET screenshot: 別キャンバス束縛ゲストは403");
+}
+
 // 13) レビュー
 r = await req(`/api/canvases/${cid}/reviews`, authJ({ verdict: "approved", comment: "OK" }));
 j = await r.json();

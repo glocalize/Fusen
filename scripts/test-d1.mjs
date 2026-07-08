@@ -122,6 +122,45 @@ assert(
   "setCommentContext: 取得済み(ctx_modal IS NOT NULL)は2回目の呼び出しで上書きされない"
 );
 
+// ---- コメントのスクリーンショット(comment_shots) ----
+{
+  const shotOwner = await q.addComment(DB, {
+    id: "mshot", canvas_id: "c_t", page: "https://ex.com/", selector: "h1",
+    rx: 0, ry: 0, ax: 0, ay: 0, body: "スクショ対象", author: "テスト", author_id: "u_t",
+    guest: false, status: "active", parent_id: null, created_at: now(),
+  });
+  assert(shotOwner.has_shot === false, "addComment: 直後は has_shot が false");
+
+  const inserted1 = await q.addCommentShot(DB, { comment_id: "mshot", mime: "image/jpeg", data_b64: "AAAA", created_at: now() });
+  assert(inserted1 === true, "addCommentShot: 初回挿入は true");
+  const inserted2 = await q.addCommentShot(DB, { comment_id: "mshot", mime: "image/png", data_b64: "BBBB", created_at: now() });
+  assert(inserted2 === false, "addCommentShot: 2回目(冪等)は false");
+
+  const shot = await q.getCommentShot(DB, "mshot");
+  assert(shot && shot.mime === "image/jpeg" && shot.data_b64 === "AAAA", "getCommentShot: first-writer-wins の内容が返る(2回目で上書きされない)");
+  assert((await q.getCommentShot(DB, "no-such-comment")) === null, "getCommentShot: 無い場合は null");
+
+  const withShot = await q.getComment(DB, "mshot");
+  assert(withShot.has_shot === true, "getComment: shot があると has_shot が true");
+  const listed = await q.listComments(DB, "c_t");
+  const listedShot = listed.find((x) => x.id === "mshot");
+  assert(listedShot.has_shot === true, "listComments: has_shot が boolean(true)で載る");
+  assert(typeof listedShot.has_shot === "boolean" && listed.every((x) => typeof x.has_shot === "boolean"), "listComments: 全件で has_shot が boolean");
+
+  // 返信にも shot を付けて、親削除で両方消えることを確認
+  await q.addComment(DB, {
+    id: "mshotReply", canvas_id: "c_t", page: "https://ex.com/", selector: null,
+    rx: 0, ry: 0, ax: 0, ay: 0, body: "返信", author: "テスト", author_id: "u_t",
+    guest: false, status: "active", parent_id: "mshot", created_at: now(),
+  });
+  await q.addCommentShot(DB, { comment_id: "mshotReply", mime: "image/jpeg", data_b64: "CCCC", created_at: now() });
+  assert((await q.getCommentShot(DB, "mshotReply")) !== null, "返信にも shot が保存できる");
+
+  await q.deleteCommentCascade(DB, "mshot");
+  assert((await q.getCommentShot(DB, "mshot")) === null, "deleteCommentCascade: 本体の shot も消える");
+  assert((await q.getCommentShot(DB, "mshotReply")) === null, "deleteCommentCascade: 返信の shot も連鎖で消える");
+}
+
 // ============ Part 2: データ移行(buildSeedSql)の件数/整合性 ============
 // git 管理外の実データではなく合成フィクスチャで検証する(hermetic)。
 // buildSeedSql の出力がソースの件数どおりに投入され、FK 的にも孤立が無いことを確認。
