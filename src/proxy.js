@@ -55,6 +55,7 @@ function augmentCsp(policy, appOrigin, nonce) {
   };
   ensure("script-src", [`'nonce-${nonce}'`, appOrigin]);
   ensure("style-src", [appOrigin]);
+  ensure("img-src", ["'self'"]);
   return [...map.entries()].map(([k, v]) => [k, ...v].join(" ")).join("; ");
 }
 

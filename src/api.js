@@ -285,6 +285,48 @@ api.delete("/comments/:id", requireUser, async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- コメント作成時スクリーンショット ----
+// data:URL 全体(mime + base64本体)の厳格な形式チェック。許容mimeはJPEG/PNG/WebPのみ。
+const DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/;
+const MAX_SHOT_B64 = 400_000; // base64本体の最大文字数(≒300KB相当のサムネイル想定)
+
+api.put("/comments/:id/screenshot", requireUser, async (c) => {
+  const m = await db.getComment(c.env.DB, c.req.param("id"));
+  if (!m) return c.json({ error: "コメントが見つかりません" }, 404);
+  if (!canAccessCanvas(c.get("user"), m.canvas_id)) return c.json({ error: "このキャンバスにはアクセスできません" }, 403);
+  // 返信スレッドにはスクリーンショットの概念が無い(親コメントの作成時コンテキストとして保存する)
+  if (m.parent_id != null) return c.json({ error: "返信にはスクリーンショットを保存できません" }, 400);
+  const b = await c.req.json().catch(() => ({}));
+  const dataUrl = String(b?.data_url || "");
+  const mmatch = dataUrl.match(DATA_URL_RE);
+  if (!mmatch) return c.json({ error: "画像データの形式が不正です" }, 400);
+  const [, mime, b64] = mmatch;
+  if (b64.length > MAX_SHOT_B64) return c.json({ error: "画像が大きすぎます" }, 413);
+  const inserted = await db.addCommentShot(c.env.DB, {
+    comment_id: m.id,
+    mime: `image/${mime}`,
+    data_b64: b64,
+    created_at: new Date().toISOString(),
+  });
+  if (!inserted) return c.json({ ok: true, existing: true });
+  return c.json({ ok: true });
+});
+
+api.get("/comments/:id/screenshot", requireUser, async (c) => {
+  const m = await db.getComment(c.env.DB, c.req.param("id"));
+  if (!m) return c.json({ error: "コメントが見つかりません" }, 404);
+  if (!canAccessCanvas(c.get("user"), m.canvas_id)) return c.json({ error: "このキャンバスにはアクセスできません" }, 403);
+  const shot = await db.getCommentShot(c.env.DB, m.id);
+  if (!shot) return c.json({ error: "スクリーンショットがありません" }, 404);
+  // base64 → バイナリへデコードして画像として配信(private: レビュー参加者以外に見せない想定)
+  const bin = atob(shot.data_b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, {
+    headers: { "content-type": shot.mime, "cache-control": "private, max-age=3600" },
+  });
+});
+
 // ---- レビュー(承認フロー) ----
 api.post("/canvases/:id/reviews", requireUser, async (c) => {
   const canvas = await db.getCanvas(c.env.DB, c.req.param("id"));
