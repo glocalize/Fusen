@@ -23,7 +23,8 @@
     "test:d1": "node --experimental-sqlite scripts/test-d1.mjs",
     "test:routes": "node --experimental-sqlite scripts/test-routes.mjs",
     "test:security": "node --experimental-sqlite scripts/test-security.mjs",
-    "test:issue": "node scripts/test-issue-format.mjs"
+    "test:issue": "node scripts/test-issue-format.mjs",
+    "test:anchor": "node scripts/test-anchor.mjs"
   },
   "dependencies": {
     "hono": "^4.6.0"

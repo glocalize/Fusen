@@ -24,6 +24,9 @@ app.get("/", async (c) => {
 });
 app.get("/login", (c) => serveAsset(c.env, new URL(c.req.url).origin, "/login.html"));
 app.get("/help", (c) => serveAsset(c.env, new URL(c.req.url).origin, "/help.html"));
+// ---- デバッグ用サンプル: モーダル等の動的UIに対するピン挙動を、外部サイト無しで検証する ----
+// API はページ内でスタブ化しているため DB には触れない(認証不要で安全な自己完結ページ)。
+app.get("/debug", (c) => serveAsset(c.env, new URL(c.req.url).origin, "/debug.html"));
 
 // ---- Fusen 自身のアセット: /fsn-assets/* → public 直下へマップ ----
 app.all("/fsn-assets/*", (c) => {

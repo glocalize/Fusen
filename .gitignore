@@ -9,3 +9,6 @@ data/
 .env*
 !.env.example
 seed.sql
+
+# VRT のスクショ出力(目視確認用の生成物)
+test/anchor/__screenshots__/

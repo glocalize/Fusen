@@ -30,6 +30,7 @@
     alert: '<path d="M12 3L1.8 20.2h20.4z"/><path d="M12 10v4"/><path d="M12 17.2v.6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     checkCircle: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/>',
+    eyeOff: '<path d="M1.5 12S5.5 5 12 5c1.7 0 3.2.4 4.6 1.1"/><path d="M22.5 12s-1.7 2.9-4.7 4.8"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/>',
   };
   const I = (name, size = 16, sw = 2.4) =>
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;flex:none;display:inline-block">${ICON_PATHS[name] || ""}</svg>`;
@@ -89,6 +90,7 @@
   let tempTargetEl = null;
   let hoverHl = null; // コメントモードのホバー対象
   const pinEls = new Map(); // comment.id -> pin要素
+  const sbItemEls = new Map(); // comment.id -> サイドバー項目要素(現在ページのみ)。非表示バッジを反応的に更新するため
   let openThreadId = null; // 現在開いているスレッドのコメントID(ポーリング更新時の判定に使う)
   let lastSig = ""; // 直近に反映したコメント状態の署名(差分検知用)
 
@@ -180,21 +182,33 @@
     toastTimer = setTimeout(() => toastEl.classList.remove("fsn-show"), 2600);
   }
 
-  // ---------- セレクタ生成(近くの一意なIDを基点に安定化) ----------
+  // ---------- セレクタ生成(近くの安定な手がかりを基点に安定化) ----------
+  // 位置ベース(nth-of-type)だけだと、モーダルの開閉やDOM再描画で兄弟の並びが変わった瞬間に
+  // 別要素へ誤マッチする。そこで一意なid・テスト用ID・アクセシビリティ属性があればそれを基点に
+  // 使い、再描画をまたいでも同じ要素を指せるようにする(再アンカー率を上げる)。
   function cssPath(elm) {
-    const uniqueId = (node) => {
-      if (!node.id) return null;
-      try {
-        return document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1 ? `#${CSS.escape(node.id)}` : null;
-      } catch {
-        return null;
+    const uniqueSel = (node) => {
+      if (!node.getAttribute) return null;
+      const tryUnique = (sel) => {
+        try { return document.querySelectorAll(sel).length === 1 ? sel : null; } catch { return null; }
+      };
+      if (node.id) { const s = tryUnique(`#${CSS.escape(node.id)}`); if (s) return s; }
+      const tag = node.tagName.toLowerCase();
+      for (const attr of ["data-testid", "data-test", "data-cy", "data-qa", "name", "aria-label"]) {
+        const val = node.getAttribute(attr);
+        if (val) {
+          const esc = String(val).replace(/["\\]/g, "\\$&");
+          const s = tryUnique(`${tag}[${attr}="${esc}"]`);
+          if (s) return s;
+        }
       }
+      return null;
     };
     const parts = [];
     let cur = elm;
     let base = "body";
     while (cur && cur !== document.body && cur.nodeType === 1 && parts.length < 12) {
-      const idSel = uniqueId(cur);
+      const idSel = uniqueSel(cur);
       if (idSel) {
         base = idSel;
         break;
@@ -319,8 +333,8 @@
   }
 
   // ---------- アンカー解決(ビューポート座標で返す) ----------
-  // lost: selector があるのに要素を見失っている状態(モーダルが閉じた等)。
-  // selector が元々 null の座標のみアンカーは「見失った」わけではないので lost:false。
+  // orphaned: 対象要素が今DOMに無い/見つからない状態(モーダルを閉じた等)。座標フォールバックで
+  // 無理に表示すると無関係な場所に浮くため、呼び出し側でキャンバス上のピンを隠す。
   function resolveViewport(a) {
     if (a.selector) {
       try {
@@ -328,13 +342,17 @@
         if (elm) {
           const r = elm.getBoundingClientRect();
           if (r.width > 0 || r.height > 0) {
-            return { x: r.left + r.width * a.rx, y: r.top + r.height * a.ry, el: elm, lost: false };
+            return { x: r.left + r.width * a.rx, y: r.top + r.height * a.ry, el: elm, orphaned: false };
           }
         }
       } catch {}
-      return { x: a.ax - scrollX, y: a.ay - scrollY, el: null, lost: true }; // 迷子: 要素が今は見つからない
     }
-    return { x: a.ax - scrollX, y: a.ay - scrollY, el: null, lost: false }; // フォールバック: 保存時のページ絶対座標
+    // 対象要素が今DOMに無い/非表示(モーダルを閉じた・別ページ・再描画で消えた等)。
+    // ここで保存時のページ絶対座標(ax/ay)に落として無理に表示すると、モーダルが在った位置の
+    // 無関係なコンテンツ上にピンが浮き、レビュアーを誤解させる。よって orphaned として返し、
+    // 呼び出し側はキャンバス上のピンを隠す(サイドバーには「非表示」と明示して見失わせない)。
+    // 座標はポップオーバー配置用の参考値として残す(placePop がビューポート内にクランプする)。
+    return { x: a.ax - scrollX, y: a.ay - scrollY, el: null, orphaned: true };
   }
 
   // ---------- ハイライト ----------
@@ -352,7 +370,6 @@
   }
 
   // ---------- 位置更新ループ(スクロール・レイアウト変化に追従) ----------
-  const LOST_TITLE = "対象の要素が今は表示されていません(モーダル等が閉じている可能性があります)";
   let rafQueued = false;
   function updatePositions() {
     rafQueued = false;
@@ -360,15 +377,16 @@
       const c = comments.find((x) => x.id === id);
       if (!c) continue;
       const p = resolveViewport(c);
+      // サイドバー項目の「今は非表示」表示をピンと同じ判定で反応的に同期する
+      // (モーダル開閉はコメントデータを変えないので、ここで毎フレーム追従させる)。
+      const sbItem = sbItemEls.get(id);
+      if (sbItem) sbItem.classList.toggle("fsn-is-hidden", p.orphaned);
+      // 対象要素が見つからないピンはキャンバスに出さない(座標フォールバックで浮かせない)。
+      if (p.orphaned) { pin.style.display = "none"; continue; }
+      pin.style.display = "";
       pin.style.left = p.x + "px";
       pin.style.top = p.y + "px";
-      // 迷子ピン: selector が解決できない間だけ見た目を変える(モーダルが再度開けば自動で通常表示に戻る)
-      if (pin.classList.contains("fsn-lost") !== !!p.lost) {
-        pin.classList.toggle("fsn-lost", !!p.lost);
-        if (p.lost) pin.title = LOST_TITLE;
-        else pin.removeAttribute("title");
-      }
-      if (!p.lost && p.el) maybeBackfillCtx(c, p.el); // ctx未取得の既存コメントを解決できた瞬間に補完
+      if (p.el) maybeBackfillCtx(c, p.el); // ctx未取得の既存コメントを解決できた瞬間に補完
     }
     if (tempPinEl && tempAnchor) {
       const p = resolveViewport(tempAnchor);
@@ -379,9 +397,6 @@
       const p = popTrack();
       placePop(popEl, p.x, p.y);
       setHighlight(p.el);
-      // スレッド内の「対象が非表示」バッジも現在の解決状態に追従させる
-      const lostBadge = popEl.querySelector(".fsn-ctx-lost");
-      if (lostBadge) lostBadge.style.display = p.lost ? "flex" : "none";
     } else if (hoverHl) {
       setHighlight(hoverHl);
     } else {
@@ -519,6 +534,7 @@
     const idx = roots().findIndex((x) => x.id === id) + 1;
     const reps = repliesOf(id);
     const mine = c.author === CFG.user.name;
+    const hidden = resolveViewport(c).orphaned; // 対象要素が今表示されていない(動的UIが閉じている等)
 
     const msgHtml = (m, reply) => `
       <div class="fsn-msg ${reply ? "fsn-reply" : ""}">
@@ -533,16 +549,13 @@
     } else if (c.ctx_label) {
       ctxLine = `対象: ${esc(c.ctx_label)}`;
     }
-    const lostNow = !!resolveViewport(c).lost;
-
     // 作成時スクリーンショット(同一オリジン・Cookie認証。表示できない環境では onerror でブロックごと消す)
     const shotUrl = c.has_shot === true ? `${API}/api/comments/${encodeURIComponent(c.id)}/screenshot` : null;
 
     popEl = el(`
       <div class="fsn-pop" data-fsn>
-        <div class="fsn-pop-head">${I("bubble", 14)} コメント #${idx} ${c.status === "resolved" ? "(解決済み)" : ""} <button class="fsn-x">${I("x", 14)}</button></div>
+        <div class="fsn-pop-head">${I("bubble", 14)} コメント #${idx} ${c.status === "resolved" ? "(解決済み)" : ""}${hidden ? ` <span class="fsn-pop-hidden">${I("eyeOff", 12)} 対象は非表示</span>` : ""} <button class="fsn-x">${I("x", 14)}</button></div>
         ${ctxLine ? `<div class="fsn-ctx">${I("pin", 12, 2.6)} <span>${ctxLine}</span></div>` : ""}
-        ${c.selector ? `<div class="fsn-ctx-lost"${lostNow ? "" : ' style="display:none"'}>${I("alert", 12, 2.6)} <span>対象が現在表示されていません(モーダルが閉じている可能性)</span></div>` : ""}
         ${shotUrl ? `<div class="fsn-shot" title="クリックで原寸表示"><img src="${esc(shotUrl)}" alt="作成時のスクリーンショット" loading="lazy"><div class="fsn-shot-cap">作成時のスクリーンショット</div></div>` : ""}
         <div class="fsn-pop-body">
           ${msgHtml(c, false)}
@@ -622,6 +635,7 @@
   // ---------- サイドバー(ページ別グループ表示) ----------
   function renderSidebar() {
     const list = sidebar.querySelector("#fsn-sb-list");
+    sbItemEls.clear();
     let items = currentPageOnly ? roots() : rootsAllPages();
     if (filter === "open") items = items.filter((c) => c.status !== "resolved");
     if (filter === "resolved") items = items.filter((c) => c.status === "resolved");
@@ -674,17 +688,18 @@
       arr.forEach((c) => {
         const reps = repliesOf(c.id).length;
         const num = isCurrent ? pageRoots.findIndex((x) => x.id === c.id) + 1 : 0;
-        // 現在ページのコメントで対象要素を見失っているもの(モーダルが閉じている等)には控えめに警告を添える
-        const lost = isCurrent && !!resolveViewport(c).lost;
+        // 現在ページの項目は「今は非表示」タグを常に埋め込んでおき、fsn-is-hidden クラスの
+        // 付け外し(updatePositions が反応的に行う)で表示/非表示を切り替える。動的UI(モーダル等)
+        // 上のコメントは、対象が閉じている間だけこのタグが点灯して「動的UI上にある」と示す。
         const subBits = [];
         if (reps) subBits.push(`返信 ${reps}件`);
         if (!isCurrent) subBits.push("クリックで移動");
-        if (lost) subBits.push(`<span class="fsn-sb-lost">${I("alert", 10, 2.8)} 対象が非表示</span>`);
         const item = el(`
           <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
             <div class="fsn-row1">
               <span class="fsn-sb-num">${num ? num : I("pin", 11, 2.6)}</span>
               <strong style="font-size:12.5px">${esc(c.author)}</strong>
+              ${isCurrent ? `<span class="fsn-hidden-tag" title="この要素は今表示されていません。モーダルやタブを開くと表示されます">${I("eyeOff", 11, 2.4)} 今は非表示</span>` : ""}
               <span class="fsn-sub">${timeAgo(c.created_at)}</span>
             </div>
             <div class="fsn-prev">${esc(c.body)}</div>
@@ -692,15 +707,25 @@
             <div class="fsn-sub">${subBits.join("  ·  ")}</div>
           </div>`);
         item.addEventListener("click", () => openFromSidebar(c));
+        if (isCurrent) sbItemEls.set(c.id, item);
         list.appendChild(item);
       });
     }
+    // 非表示インジケータの初期反映(フィルタ/検索など単独再描画からも即時に効かせる)
+    queueUpdate();
   }
 
   // サイドバー項目クリック: 同じページなら開く、別ページならそのページへ移動して開く
   function openFromSidebar(c) {
     if (normalize(c.page) === PAGE) {
       const p = resolveViewport(c);
+      // 対象が今表示されていない(モーダルを閉じている等): 何もない場所へスクロールさせず、
+      // 「どこにあるか」を明示してスレッドだけ開く(読む/返信/Issue化は可能)。
+      if (p.orphaned) {
+        toast("この要素は今表示されていません。モーダルやタブを開くと表示されます");
+        openThread(c.id);
+        return;
+      }
       window.scrollTo({ top: Math.max(0, scrollY + p.y - innerHeight / 3), behavior: "smooth" });
       setTimeout(() => openThread(c.id), 400);
     } else {
