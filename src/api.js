@@ -208,6 +208,9 @@ api.post("/canvases/:id/comments", requireUser, async (c) => {
   const bodyText = String(b?.body || "").trim().slice(0, 4000);
   if (!bodyText) return c.json({ error: "コメントを入力してください" }, 400);
   const user = c.get("user");
+  // コメント対象のコンテキスト(#モーダルコメント問題対応): ctx_modal が無い(boolean でない)
+  // 場合は「未取得」として扱い、ラベル類も null にする(部分保存を避ける)。
+  const ctx = normalizeCtx(b);
   const m = {
     id: db.nid("m_"),
     canvas_id: canvas.id,
@@ -225,10 +228,27 @@ api.post("/canvases/:id/comments", requireUser, async (c) => {
     parent_id: b?.parent_id || null,
     resolved_by: null,
     created_at: new Date().toISOString(),
+    ctx_label: ctx.ctx_label,
+    ctx_modal: ctx.ctx_modal,
+    ctx_modal_label: ctx.ctx_modal_label,
   };
   const saved = await db.addComment(c.env.DB, m);
   return c.json({ comment: saved });
 });
+
+// コメント対象コンテキストのバリデーション/正規化(POST/PATCH共通)。
+// ctx_modal が boolean でなければ「未取得」扱いとし、ラベル類も null にする(部分保存を避ける)。
+function normalizeCtx(b) {
+  const ctx_modal = typeof b?.ctx_modal === "boolean" ? b.ctx_modal : null;
+  if (ctx_modal === null) return { ctx_label: null, ctx_modal: null, ctx_modal_label: null };
+  const label = String(b?.ctx_label || "").trim().slice(0, 120);
+  const modalLabel = String(b?.ctx_modal_label || "").trim().slice(0, 120);
+  return {
+    ctx_label: label || null,
+    ctx_modal,
+    ctx_modal_label: modalLabel || null,
+  };
+}
 
 api.patch("/comments/:id", requireUser, async (c) => {
   const m = await db.getComment(c.env.DB, c.req.param("id"));
@@ -236,13 +256,22 @@ api.patch("/comments/:id", requireUser, async (c) => {
   // 解決/再オープンはそのキャンバスにアクセスできる人のみ(#3 IDOR)
   if (!canAccessCanvas(c.get("user"), m.canvas_id)) return c.json({ error: "権限がありません" }, 403);
   const b = await c.req.json().catch(() => ({}));
+  let current = m;
   if (b?.status && ["active", "resolved"].includes(b.status)) {
     const user = c.get("user");
     const resolvedBy = b.status === "resolved" ? user.name : null;
-    const updated = await db.setCommentStatus(c.env.DB, m.id, b.status, resolvedBy);
-    return c.json({ comment: updated });
+    current = await db.setCommentStatus(c.env.DB, m.id, b.status, resolvedBy);
   }
-  return c.json({ comment: m });
+  // コンテキストの遅延バックフィル: モーダル再表示時などにクライアントが追記する。
+  // 未取得(ctx_modal IS NULL)かつ selector がある(=アンカー可能な)コメントのみ対象。
+  // 条件を満たさない場合は無視(エラーにしない)。status 更新と同時に来ても両方処理する。
+  if (typeof b?.ctx_modal === "boolean") {
+    if (current.ctx_modal === null && current.selector != null) {
+      const ctx = normalizeCtx(b);
+      current = await db.setCommentContext(c.env.DB, m.id, ctx);
+    }
+  }
+  return c.json({ comment: current });
 });
 
 api.delete("/comments/:id", requireUser, async (c) => {

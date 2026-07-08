@@ -2,7 +2,7 @@
 // ASSETS / fetch のモックを渡して、実際のリクエストでルートを叩く。
 // 実行: node --experimental-sqlite scripts/test-routes.mjs
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import app from "../src/index.js";
 import { basicAuthHeader, isSpaHost } from "../src/proxy.js";
 import { buildSeedSql } from "./seed-sql.mjs";
@@ -36,7 +36,12 @@ const here = (p) => new URL(p, import.meta.url);
 const fixture = JSON.parse(readFileSync(here("../test/fixtures/db.json"), "utf8"));
 const sq = new DatabaseSync(":memory:");
 sq.exec("PRAGMA foreign_keys = ON;");
-sq.exec(readFileSync(here("../migrations/0001_init.sql"), "utf8"));
+// migrations/ 配下の *.sql をファイル名順(0001_..., 0002_...)に全部連結して適用する。
+{
+  const dir = here("../migrations/");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
+  for (const f of files) sq.exec(readFileSync(new URL(f, dir), "utf8"));
+}
 sq.exec(buildSeedSql(fixture)); // フィクスチャの4キャンバス等
 
 // ASSETS モック(静的配信)。リクエストパスを反映した HTML を返す。
@@ -135,6 +140,33 @@ assert(j.ok === true, "コメント削除 ok");
 r = await req(`/api/canvases/${cid}/comments`, auth());
 j = await r.json();
 assert(j.comments.length === 0, "親削除で返信も消える");
+
+// 12.5) コメントのコンテキスト(#モーダルコメント問題対応)
+// (a) POST時にctxを付けると保存されて返る
+r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "モーダルのコメント", page: "https://example.com/", selector: "div.modal button", ctx_label: "保存ボタン", ctx_modal: true, ctx_modal_label: "設定" }));
+j = await r.json();
+const ctxMid = j.comment.id;
+assert(j.comment.ctx_label === "保存ボタン" && j.comment.ctx_modal === true && j.comment.ctx_modal_label === "設定", "POST comments: ctxフィールドが保存されて返る");
+
+// (b) ctxなしPOST → PATCHでctxバックフィルできる
+r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "後付け対象", page: "https://example.com/", selector: "h2.title" }));
+j = await r.json();
+const noCtxMid = j.comment.id;
+assert(j.comment.ctx_modal === null, "POST comments: ctxなしはctx_modal:nullで作られる");
+r = await req(`/api/comments/${noCtxMid}`, { method: "PATCH", headers: { Cookie: cookie, "content-type": "application/json" }, body: JSON.stringify({ ctx_label: "後付けラベル", ctx_modal: true, ctx_modal_label: "後付けモーダル" }) });
+j = await r.json();
+assert(j.comment.ctx_modal === true && j.comment.ctx_label === "後付けラベル" && j.comment.ctx_modal_label === "後付けモーダル", "PATCH comments: ctxなしコメントへのバックフィルが反映される");
+
+// (c) ctx取得済みコメントへのPATCHバックフィルは無視される(値が変わらない)
+r = await req(`/api/comments/${ctxMid}`, { method: "PATCH", headers: { Cookie: cookie, "content-type": "application/json" }, body: JSON.stringify({ ctx_label: "上書き試行", ctx_modal: false, ctx_modal_label: "上書き試行" }) });
+j = await r.json();
+assert(j.comment.ctx_modal === true && j.comment.ctx_label === "保存ボタン", "PATCH comments: ctx取得済みへのバックフィルは無視される");
+
+// (d) 120字超のctx_labelが切り詰められる
+const longLabel = "あ".repeat(150);
+r = await req(`/api/canvases/${cid}/comments`, authJ({ body: "長いラベル", page: "https://example.com/", selector: "p.long", ctx_label: longLabel, ctx_modal: true, ctx_modal_label: longLabel }));
+j = await r.json();
+assert(j.comment.ctx_label.length === 120 && j.comment.ctx_modal_label.length === 120, "POST comments: 120字超のctx_labelが切り詰められる");
 
 // 13) レビュー
 r = await req(`/api/canvases/${cid}/reviews`, authJ({ verdict: "approved", comment: "OK" }));

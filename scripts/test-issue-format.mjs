@@ -77,5 +77,24 @@ const body2 = F.buildIssueBody({
 assert(body2.includes("- 要素: `(セレクタなし)`"), "buildIssueBody: セレクタ空はフォールバック表示");
 assert(body2.includes("- ピン: #1（解決済み）"), "buildIssueBody: 解決済み表示");
 
+// 作成時コンテキスト(ctx)あり: 「- 対象: …（ダイアログ「…」内）」の行が入る
+const body3 = F.buildIssueBody({
+  canvasTitle: "x", pageUrl: "u", selector: "s", pinNo: 2, status: "active",
+  deepLink: "d", rootBody: "b", threadBlock: "t", generatedAt: "2026-07-06T00:00:00",
+  ctxLabel: "購入するボタン", ctxModal: true, ctxModalLabel: "購入の確認",
+});
+assert(body3.includes("- 対象: 購入するボタン（ダイアログ「購入の確認」内）"), "buildIssueBody: ctxあり(モーダル内)は対象行を追加");
+
+// ctxなし(既存コメント): 対象行は出さない
+assert(!body.includes("- 対象: "), "buildIssueBody: ctxなしは対象行を出さない");
+
+// ctxあり・モーダル外: ダイアログ表記なしの対象行のみ
+const body4 = F.buildIssueBody({
+  canvasTitle: "x", pageUrl: "u", selector: "s", pinNo: 2, status: "active",
+  deepLink: "d", rootBody: "b", threadBlock: "t", generatedAt: "2026-07-06T00:00:00",
+  ctxLabel: "ヒーロー見出し", ctxModal: false, ctxModalLabel: "",
+});
+assert(body4.includes("- 対象: ヒーロー見出し") && !body4.includes("ダイアログ"), "buildIssueBody: ctxあり(モーダル外)はラベルのみ");
+
 console.log(`\n結果: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
