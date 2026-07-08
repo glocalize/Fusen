@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fusen! デバッグ用サンプル</title>
+<!-- 本物の overlay をそのまま読み込む。API だけスタブ化(下の inline script)。
+     VRT(scripts/test-anchor.mjs)はこの2つの URL を file:// に書き換えてヘッドレスで読み込む。 -->
+<link rel="stylesheet" href="/fsn-assets/fusen-overlay.css">
+<style>
+  body { font-family: "M PLUS Rounded 1c", sans-serif; margin: 0; color: #21283b; }
+  header { padding: 24px; background: #eef4ff; }
+  section { padding: 40px 24px; min-height: 60vh; border-bottom: 1px dashed #cbd2e0; }
+  #base-target { padding: 10px 16px; font-size: 16px; }
+  .mback { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9000;
+           display: flex; align-items: center; justify-content: center; }
+  .mbox { position: relative; background: #fff; width: 440px; max-width: 90vw; border-radius: 12px; padding: 28px; }
+  .mbox h3 { margin: 0 0 12px; }
+  .mclose { position: absolute; top: 10px; right: 12px; width: 30px; height: 30px; border: none;
+            background: #eef2fb; border-radius: 8px; font-size: 18px; line-height: 1; cursor: pointer; }
+  .mrow { display: flex; gap: 16px; align-items: center; }
+  .m-apply { padding: 10px 18px; font-size: 15px; background: #ff6b35; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+  .mlink { color: #5b7fff; font-weight: 700; text-decoration: underline; cursor: pointer; }
+  .decoy { height: 4px; background: transparent; }
+  #ctl { position: fixed; top: 10px; right: 10px; z-index: 9500; background: #21283b; color: #fff;
+         padding: 12px 14px; border-radius: 10px; font-size: 12px; max-width: 250px; line-height: 1.6; }
+  #ctl button { display: inline-block; margin: 5px 5px 0 0; padding: 6px 10px; font-size: 12px;
+                border: none; border-radius: 6px; background: #ff6b35; color: #fff; cursor: pointer; }
+  #ctl .g { color: #ffc53d; font-weight: 800; margin-bottom: 4px; }
+</style>
+<script>
+// ---- __FUSEN__ 設定 + API スタブ(ネットワークだけ差し替え、overlay 本体は本物) ----
+(function () {
+  const PAGE = "https://debug.fusen.local/";
+  window.__FUSEN__ = {
+    canvasId: "c_debug",
+    canvasTitle: "デバッグ用キャンバス",
+    canvasHost: "debug.fusen.local",
+    page: PAGE,
+    apiBase: location.origin,
+    user: { name: "デバッガー", guest: false },
+  };
+
+  const store = [];
+  let seq = 0;
+  window.__STORE__ = store;
+
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (url, opt = {}) => {
+    const u = String(url);
+    const method = (opt.method || "GET").toUpperCase();
+    const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (/\/api\/canvases\/[^/]+\/comments$/.test(u) && method === "GET") return json({ comments: store });
+    if (/\/api\/canvases\/[^/]+\/comments$/.test(u) && method === "POST") {
+      const b = JSON.parse(opt.body || "{}");
+      const m = {
+        id: "m_" + (++seq), canvas_id: "c_debug", page: b.page || PAGE,
+        selector: b.selector ?? null, rx: Number(b.rx) || 0, ry: Number(b.ry) || 0,
+        ax: Number(b.ax) || 0, ay: Number(b.ay) || 0, body: String(b.body || ""),
+        author: "デバッガー", author_id: "u_dbg", guest: false, status: "active",
+        parent_id: b.parent_id || null, resolved_by: null, created_at: new Date(Date.now() + seq).toISOString(),
+      };
+      store.push(m);
+      return json({ comment: m });
+    }
+    if (/\/api\/comments\/[^/]+$/.test(u)) { // PATCH(解決) / DELETE
+      const id = u.split("/").pop();
+      if (method === "DELETE") { const i = store.findIndex((c) => c.id === id); if (i >= 0) store.splice(i, 1); return json({ ok: true }); }
+      const b = JSON.parse(opt.body || "{}"); const c = store.find((x) => x.id === id);
+      if (c && b.status) { c.status = b.status; c.resolved_by = b.status === "resolved" ? "デバッガー" : null; }
+      return json({ comment: c });
+    }
+    if (/\/api\/canvases\/[^/]+$/.test(u) && method === "GET") return json({ canvas: { id: "c_debug" }, reviews: [], share_url: location.origin + "/s/x" });
+    return realFetch(url, opt); // fsn-assets 等はそのまま
+  };
+})();
+</script>
+</head>
+<body>
+  <div id="ctl">
+    <div class="g">Fusen デバッグ用サンプル</div>
+    ①下の「コメント」に切替 → ②モーダル内の要素をクリックしてPin → ③「見る」に戻して「閉じる」。
+    ピンが消え、右下「コメント」一覧でそのコメントに <b>今は非表示</b> が点灯します。再度「モーダルを開く」と復帰します。
+    <div>
+      <button id="ctl-open">モーダルを開く</button>
+      <button id="ctl-close">閉じる</button>
+    </div>
+  </div>
+
+  <header><h1>デバッグ用サンプルページ</h1><button id="base-target">通常のボタン(スクロール追従テスト)</button></header>
+  <section>セクション A（下方向スクロール用の余白）</section>
+  <section>セクション B</section>
+  <section>セクション C</section>
+
+<script>
+// ---- 手動デバッグ + 自動テスト(VRT)共通の操作API ----
+(function () {
+  const raf2 = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function until(fn, ms = 4000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { if (fn()) return true; await raf2(); }
+    return false;
+  }
+  const pins = () => [...document.querySelectorAll("#fsn-pins .fsn-pin:not(.fsn-temp)")];
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
+
+  function openModal() {
+    if (document.querySelector(".mback")) return;
+    const back = document.createElement("div");
+    back.className = "mback";
+    back.innerHTML = `<div class="mbox">
+      <button class="mclose" aria-label="閉じる">×</button>
+      <h3>設定モーダル</h3><p>これはモーダル内の要素です。</p>
+      <div class="mrow">
+        <button class="m-apply" data-testid="apply">適用する</button>
+        <a class="mlink">詳細を見る(安定属性なし)</a>
+      </div></div>`;
+    // ×ボタン / 背景クリックで閉じる(実際のモーダルらしいUX。見るモードならいつでも閉じられる)
+    back.addEventListener("click", (e) => {
+      if (e.target === back || e.target.classList.contains("mclose")) back.remove();
+    });
+    document.body.appendChild(back);
+  }
+  function closeModal() { const b = document.querySelector(".mback"); if (b) b.remove(); }
+
+  async function pinOn(targetSel, text) {
+    document.querySelector("#fsn-mode-comment").click();
+    await raf2();
+    const target = document.querySelector(targetSel);
+    const r = target.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const catcher = document.querySelector("#fsn-catcher");
+    catcher.dispatchEvent(new MouseEvent("mousemove", { clientX: cx, clientY: cy, bubbles: true }));
+    catcher.dispatchEvent(new MouseEvent("click", { clientX: cx, clientY: cy, bubbles: true }));
+    await until(() => document.querySelector(".fsn-pop textarea"));
+    const before = pins().length;
+    document.querySelector(".fsn-pop textarea").value = text;
+    document.querySelector('.fsn-pop [data-act="save"]').click();
+    await until(() => pins().length > before);
+    document.querySelector("#fsn-mode-browse").click();
+    await raf2();
+    return window.__STORE__[window.__STORE__.length - 1];
+  }
+
+  function measurePin(num) {
+    const pin = pins().find((p) => (p.querySelector("span")?.textContent || "").trim() === String(num));
+    if (!pin) return { num, error: "pin-not-found" };
+    const pr = pin.getBoundingClientRect();
+    // ピンは「先端(tip)=クリック位置」で対象に刺さる形状。CSS の margin(-6px左, -34px上)ぶん
+    // ずれるので、中心ではなく先端(=保存アンカー点)で対象要素との一致を判定する。
+    const ax = pr.left + 6, ay = pr.top + 34;
+    const cm = window.__STORE__[num - 1];
+    const sel = cm ? cm.selector : null;
+    let live = null; try { live = sel ? document.querySelector(sel) : null; } catch {}
+    const liveRect = live ? rectOf(live) : null;
+    const liveVisible = !!(liveRect && (liveRect.width > 0 || liveRect.height > 0));
+    const pinVisible = pin.offsetParent !== null && pr.width > 0;
+    const anchoredToLive = pinVisible && liveVisible &&
+      ax >= liveRect.left - 3 && ax <= liveRect.left + liveRect.width + 3 &&
+      ay >= liveRect.top - 3 && ay <= liveRect.top + liveRect.height + 3;
+    return {
+      num, selector: sel, pinVisible, selectorResolves: !!live, selectorVisible: liveVisible,
+      anchoredToLive, anchorPoint: { x: Math.round(ax), y: Math.round(ay) },
+    };
+  }
+
+  window.repro = {
+    async ready() { return until(() => document.querySelector("#fsn-pins") && window.__FUSEN_LOADED__, 6000); },
+    openModal, closeModal, pinOn, measurePin,
+    // サイドバー項目(番号=num)の「今は非表示」状態を返す(反応的インジケータの検証用)
+    sidebarHidden(num) {
+      const items = [...document.querySelectorAll("#fsn-sb-list .fsn-sb-item")];
+      const it = items.find((el) => (el.querySelector(".fsn-sb-num")?.textContent || "").trim() === String(num));
+      if (!it) return { num, error: "sb-item-not-found" };
+      const tag = it.querySelector(".fsn-hidden-tag");
+      return { num, isHidden: it.classList.contains("fsn-is-hidden"), tagVisible: tag ? getComputedStyle(tag).display !== "none" : false };
+    },
+    scrollTo(y) { window.scrollTo(0, y); return raf2().then(() => ({ scrollY: window.scrollY })); },
+    addDecoy() { const d = document.createElement("div"); d.className = "decoy"; document.body.insertBefore(d, document.body.firstChild); return true; },
+    sleep,
+  };
+
+  document.getElementById("ctl-open").addEventListener("click", openModal);
+  document.getElementById("ctl-close").addEventListener("click", closeModal);
+  // 注: addDecoy(位置ベースセレクタをわざと壊すDOM変化) は VRT 用に window.repro に残してあります
+})();
+</script>
+<script src="/fsn-assets/fusen-overlay.js" defer></script>
+</body>
+</html>

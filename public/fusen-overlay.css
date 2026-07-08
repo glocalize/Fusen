@@ -184,6 +184,13 @@
 .fsn-msg .fsn-when { color: #8a90a3; font-weight: 500; font-size: 11px; }
 .fsn-msg .fsn-text { font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
 .fsn-guest-tag { background: var(--fsn-yellow); border: 1.5px solid var(--fsn-ink); border-radius: 6px; font-size: 10px; padding: 0 5px; font-weight: 800; }
+/* 動的UI(モーダル等)上のコメントが、対象を閉じている間だけ点灯する「今は非表示」タグ。
+   既定は非表示で、fsn-is-hidden(updatePositions が反応的に付与)のときだけ表示する。 */
+.fsn-hidden-tag { display: none; flex: none; align-items: center; gap: 3px; background: var(--fsn-pink); color: var(--fsn-ink); border: 1.5px solid var(--fsn-ink); border-radius: 6px; font-size: 10px; padding: 0 5px; font-weight: 800; white-space: nowrap; }
+.fsn-sb-item.fsn-is-hidden .fsn-hidden-tag { display: inline-flex; }
+/* 対象が非表示の項目は、番号バッジを「未配置」を表す破線グレーにして一覧で区別できるようにする */
+.fsn-sb-item.fsn-is-hidden .fsn-sb-num { background: #b9bccb; border: 1.5px dashed var(--fsn-ink); }
+.fsn-pop-hidden { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 800; color: var(--fsn-pink); }
 .fsn-pop-foot { padding: 10px 14px 12px; border-top: 2px dashed rgba(33,40,59,0.2); }
 .fsn-pop textarea {
   width: 100%;
