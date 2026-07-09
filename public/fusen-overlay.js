@@ -31,6 +31,7 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     checkCircle: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/>',
     eyeOff: '<path d="M1.5 12S5.5 5 12 5c1.7 0 3.2.4 4.6 1.1"/><path d="M22.5 12s-1.7 2.9-4.7 4.8"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/>',
+    trash: '<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
   };
   const I = (name, size = 16, sw = 2.4) =>
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;flex:none;display:inline-block">${ICON_PATHS[name] || ""}</svg>`;
@@ -463,6 +464,39 @@
     setHighlight(null);
   }
 
+  // スレッド表示の共通部品(通常スレッドと別ページスレッドで共用)
+  const msgHtml = (m, reply) => `
+    <div class="fsn-msg ${reply ? "fsn-reply" : ""}">
+      <div class="fsn-who">${esc(m.author)} ${m.guest ? '<span class="fsn-guest-tag">ゲスト</span>' : ""} <span class="fsn-when">${timeAgo(m.created_at)}</span></div>
+      <div class="fsn-text">${esc(m.body)}</div>
+    </div>`;
+  // 対象情報行(何にコメントしたか)。ctx はサーバー由来のため必ず esc() を通す
+  function ctxLineOf(c) {
+    if (c.ctx_modal === true) {
+      return `ダイアログ${c.ctx_modal_label ? `「${esc(c.ctx_modal_label)}」` : ""}内${c.ctx_label ? ` · 対象: ${esc(c.ctx_label)}` : ""}`;
+    }
+    if (c.ctx_label) return `対象: ${esc(c.ctx_label)}`;
+    return "";
+  }
+
+  // コメント削除(スレッドポップオーバー・別ページスレッド・サイドバーで共用)。
+  // 破壊操作はサーバー側でも投稿者本人のみに制限(#3 IDOR)。成否を返す。
+  async function deleteComment(id) {
+    if (!confirm("このコメントを削除しますか?(返信も消えます)")) return false;
+    try {
+      await apiCall(`/api/comments/${id}`, { method: "DELETE" });
+      comments = comments.filter((x) => x.id !== id && x.parent_id !== id);
+      markSynced();
+      if (openThreadId === id) closePop(); // 開いていたスレッドが消えたら閉じる
+      renderPins(); // renderSidebar() も走るのでサイドバーからの削除でも一覧が更新される
+      toast("削除しました");
+      return true;
+    } catch (e) {
+      toast(e.message);
+      return false;
+    }
+  }
+
   function placePop(pop, x, y) {
     const W = 320;
     let left = x + 22;
@@ -536,19 +570,7 @@
     const mine = c.author === CFG.user.name;
     const hidden = resolveViewport(c).orphaned; // 対象要素が今表示されていない(動的UIが閉じている等)
 
-    const msgHtml = (m, reply) => `
-      <div class="fsn-msg ${reply ? "fsn-reply" : ""}">
-        <div class="fsn-who">${esc(m.author)} ${m.guest ? '<span class="fsn-guest-tag">ゲスト</span>' : ""} <span class="fsn-when">${timeAgo(m.created_at)}</span></div>
-        <div class="fsn-text">${esc(m.body)}</div>
-      </div>`;
-
-    // 対象情報行(何にコメントしたか)。ctx はサーバー由来のため必ず esc() を通す
-    let ctxLine = "";
-    if (c.ctx_modal === true) {
-      ctxLine = `ダイアログ${c.ctx_modal_label ? `「${esc(c.ctx_modal_label)}」` : ""}内${c.ctx_label ? ` · 対象: ${esc(c.ctx_label)}` : ""}`;
-    } else if (c.ctx_label) {
-      ctxLine = `対象: ${esc(c.ctx_label)}`;
-    }
+    const ctxLine = ctxLineOf(c);
     // 作成時スクリーンショット(同一オリジン・Cookie認証。表示できない環境では onerror でブロックごと消す)
     const shotUrl = c.has_shot === true ? `${API}/api/comments/${encodeURIComponent(c.id)}/screenshot` : null;
 
@@ -616,20 +638,80 @@
     });
     popEl.querySelector('[data-act="issue"]').addEventListener("click", () => openIssuePanel(id));
     const delBtn = popEl.querySelector('[data-act="del"]');
-    if (delBtn)
-      delBtn.addEventListener("click", async () => {
-        if (!confirm("このコメントを削除しますか?(返信も消えます)")) return;
-        try {
-          await apiCall(`/api/comments/${id}`, { method: "DELETE" });
-          comments = comments.filter((x) => x.id !== id && x.parent_id !== id);
-          markSynced();
-          closePop();
-          renderPins();
-          toast("削除しました");
-        } catch (e) {
-          toast(e.message);
-        }
-      });
+    if (delBtn) delBtn.addEventListener("click", () => deleteComment(id));
+  }
+
+  // 別ページのコメントを「遷移せずに」読み取り専用で表示する。
+  // 以前はサイドバーから別ページのコメントを開くと location.href でそのページへ強制遷移していたが、
+  // 削除済みページ(プロキシ先が404/リダイレクトを返す)ではその取得が繰り返されてループになる。
+  // 閲覧・解決・削除はここで完結させ、生きたページで文脈確認したい場合だけ「このページを開く」で遷移する。
+  function openThreadOther(c) {
+    closePop();
+    const reps = repliesOf(c.id);
+    const mine = c.author === CFG.user.name;
+    const ctxLine = ctxLineOf(c);
+    const shotUrl = c.has_shot === true ? `${API}/api/comments/${encodeURIComponent(c.id)}/screenshot` : null;
+
+    const bg = el(`
+      <div class="fsn-modal-bg" data-fsn>
+        <div class="fsn-modal fsn-thread-modal">
+          <h2>${I("bubble", 18)} 別ページのコメント${c.status === "resolved" ? "(解決済み)" : ""}</h2>
+          <div class="fsn-other-page" title="${esc(c.page)}">${I("home", 12)} <span>${esc(pageLabel(c.page))}</span></div>
+          ${ctxLine ? `<div class="fsn-ctx">${I("pin", 12, 2.6)} <span>${ctxLine}</span></div>` : ""}
+          ${shotUrl ? `<div class="fsn-shot" title="クリックで原寸表示"><img src="${esc(shotUrl)}" alt="作成時のスクリーンショット" loading="lazy"><div class="fsn-shot-cap">作成時のスクリーンショット</div></div>` : ""}
+          <div class="fsn-pop-body">
+            ${msgHtml(c, false)}
+            ${reps.map((r) => msgHtml(r, true)).join("")}
+          </div>
+          <div class="fsn-pop-actions" style="margin-top:14px">
+            ${mine ? '<button class="fsn-btn fsn-plain fsn-danger" data-act="del">削除</button>' : ""}
+            <button class="fsn-btn ${c.status === "resolved" ? "" : "fsn-teal"}" data-act="resolve">${c.status === "resolved" ? I("undo", 13) + " 再オープン" : I("check", 13) + " 解決にする"}</button>
+            <button class="fsn-btn" data-act="open">${I("home", 13)} このページを開く</button>
+            <button class="fsn-btn fsn-primary" data-act="close">閉じる</button>
+          </div>
+        </div>
+      </div>`);
+    root.appendChild(bg);
+    const close = () => bg.remove();
+    bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
+    bg.querySelector('[data-act="close"]').addEventListener("click", close);
+
+    // スクリーンショット: クリックで原寸表示。読み込めない環境ではブロックごと非表示
+    const shotBlock = bg.querySelector(".fsn-shot");
+    if (shotBlock && shotUrl) {
+      shotBlock.querySelector("img").addEventListener("error", () => { shotBlock.style.display = "none"; });
+      shotBlock.addEventListener("click", () => window.open(shotUrl, "_blank"));
+    }
+
+    // このページを開く: 生きているページで文脈込みに見たい場合の明示的な遷移(既定の閲覧では遷移しない)
+    bg.querySelector('[data-act="open"]').addEventListener("click", () => {
+      try {
+        const u = new URL(c.page);
+        location.href = `${API}/p/${CFG.canvasId}${u.pathname}${u.search}#fsn=${encodeURIComponent(c.id)}`;
+      } catch {
+        toast("このコメントのページを開けませんでした");
+      }
+    });
+
+    bg.querySelector('[data-act="resolve"]').addEventListener("click", async () => {
+      try {
+        const next = c.status === "resolved" ? "active" : "resolved";
+        const d = await apiCall(`/api/comments/${c.id}`, { method: "PATCH", body: JSON.stringify({ status: next }) });
+        Object.assign(c, d.comment);
+        markSynced();
+        renderPins();
+        close();
+        openThreadOther(c); // 解決状態を反映して開き直す
+        if (next === "resolved") toast("解決済みにしました");
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+
+    const delBtn = bg.querySelector('[data-act="del"]');
+    if (delBtn) delBtn.addEventListener("click", async () => {
+      if (await deleteComment(c.id)) close();
+    });
   }
 
   // ---------- サイドバー(ページ別グループ表示) ----------
@@ -693,7 +775,8 @@
         // 上のコメントは、対象が閉じている間だけこのタグが点灯して「動的UI上にある」と示す。
         const subBits = [];
         if (reps) subBits.push(`返信 ${reps}件`);
-        if (!isCurrent) subBits.push("クリックで移動");
+        if (!isCurrent) subBits.push("クリックで開く");
+        const mine = c.author === CFG.user.name; // 削除は投稿者本人のみ(サーバー側でも #3 IDOR で制限)
         const item = el(`
           <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
             <div class="fsn-row1">
@@ -701,12 +784,15 @@
               <strong style="font-size:12.5px">${esc(c.author)}</strong>
               ${isCurrent ? `<span class="fsn-hidden-tag" title="この要素は今表示されていません。モーダルやタブを開くと表示されます">${I("eyeOff", 11, 2.4)} 今は非表示</span>` : ""}
               <span class="fsn-sub">${timeAgo(c.created_at)}</span>
+              ${mine ? `<button class="fsn-sb-del" title="このコメントを削除" aria-label="このコメントを削除">${I("trash", 13, 2.4)}</button>` : ""}
             </div>
             <div class="fsn-prev">${esc(c.body)}</div>
             ${c.ctx_modal === true ? `<div class="fsn-sb-ctx">ダイアログ内${c.ctx_modal_label ? ": " + esc(c.ctx_modal_label) : ""}</div>` : ""}
             <div class="fsn-sub">${subBits.join("  ·  ")}</div>
           </div>`);
         item.addEventListener("click", () => openFromSidebar(c));
+        const sbDel = item.querySelector(".fsn-sb-del");
+        if (sbDel) sbDel.addEventListener("click", (e) => { e.stopPropagation(); deleteComment(c.id); });
         if (isCurrent) sbItemEls.set(c.id, item);
         list.appendChild(item);
       });
@@ -729,12 +815,8 @@
       window.scrollTo({ top: Math.max(0, scrollY + p.y - innerHeight / 3), behavior: "smooth" });
       setTimeout(() => openThread(c.id), 400);
     } else {
-      try {
-        const u = new URL(c.page);
-        location.href = `${API}/p/${CFG.canvasId}${u.pathname}${u.search}#fsn=${encodeURIComponent(c.id)}`;
-      } catch {
-        toast("このコメントのページを開けませんでした");
-      }
+      // 別ページ: 遷移せず読み取り専用スレッドで開く(削除済みページでの取得ループを避ける)。
+      openThreadOther(c);
     }
   }
 
