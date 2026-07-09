@@ -4,7 +4,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import app from "../src/index.js";
-import { basicAuthHeader, isSpaHost } from "../src/proxy.js";
+import { basicAuthHeader, isSpaHost, injectOverlay } from "../src/proxy.js";
 import { buildSeedSql } from "./seed-sql.mjs";
 
 let pass = 0, fail = 0;
@@ -278,6 +278,21 @@ assert(basicAuthHeader({ PROXY_BASIC_AUTH_HOSTS: "example.com" }, "example.com")
 assert(isSpaHost({ PROXY_SPA_HOSTS: "example.com" }, "example.com") === true, "isSpaHost: 対象ホストは true");
 assert(isSpaHost({ PROXY_SPA_HOSTS: "example.com" }, "evil.com") === false, "isSpaHost: 対象外は false");
 assert(isSpaHost({}, "example.com") === false, "isSpaHost: 未設定は false");
+
+// injectOverlay: インラインJS(PDF出力等)が文字列に </body> を含んでも壊さない(#12)
+{
+  const io = { canvas: { id: "c1", title: "t", host: "example.com" }, finalUrl: "https://example.com/", appOrigin: "https://app.test", user: { name: "太郎", guest: false }, spa: false };
+  const page =
+    "<html><head></head><body><h1>本文</h1>" +
+    "<script>var doc = `<html><body>PDF内容</body></html>`; window.open('','_blank').document.write(doc);<\/script>" +
+    "</body></html>";
+  const out = injectOverlay(page, io);
+  const bootIdx = out.indexOf("fusen-overlay.js");
+  const realBodyIdx = out.lastIndexOf("</body>");
+  assert(bootIdx >= 0 && bootIdx < realBodyIdx, "injectOverlay: boot は本物の(最後の)</body>直前に注入される");
+  assert(out.indexOf("</body>") < bootIdx, "injectOverlay: スクリプト内の偽</body>には注入しない");
+  assert(out.includes("window.open('','_blank').document.write(doc)"), "injectOverlay: 元のインラインJSが分断されず残る");
+}
 
 console.log(`\n結果: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
