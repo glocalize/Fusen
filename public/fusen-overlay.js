@@ -1258,35 +1258,53 @@
   // ・対象サイトへの絶対リンク → プロキシ表示URLに変換
   // ・相対リンク(=自オリジン宛になる) → そのまま通す(サーバーのフォールバック中継が処理)
   // ・外部サイト → 新しいタブで素のまま開く
-  document.addEventListener(
-    "click",
-    (e) => {
-      if (e.target.closest && e.target.closest("[data-fsn]")) return;
-      const a = e.target.closest ? e.target.closest("a[href]") : null;
-      if (!a) return;
-      let href;
-      try {
-        href = new URL(a.getAttribute("href"), location.href);
-      } catch {
-        return;
-      }
-      if (!/^https?:$/.test(href.protocol)) return;
+  function handleLinkClick(e) {
+    if (e.target.closest && e.target.closest("[data-fsn]")) return;
+    const a = e.target.closest ? e.target.closest("a[href]") : null;
+    if (!a) return;
+    let href;
+    try {
+      href = new URL(a.getAttribute("href"), location.href);
+    } catch {
+      return;
+    }
+    if (!/^https?:$/.test(href.protocol)) return;
 
-      // 相対リンク等で自オリジン宛になったものは、サーバー側中継に任せる
-      if (href.host === location.host) return;
+    // 別タブで開く意図(target=_blank / 修飾キー / 中クリック)を尊重する。
+    // これを無視して現在タブを location.href でプロキシ遷移させると、遷移先が
+    // リロードやリダイレクトを繰り返すページ(=削除済みページ等の取得ループ)だった場合、
+    // 作業中タブごと固まる。別タブ意図があるときは現在タブを巻き込まず新タブで開く。
+    const wantsNewTab =
+      /^_blank$/i.test(a.getAttribute("target") || "") ||
+      e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1;
 
-      const sameSite = href.hostname === CFG.canvasHost;
-      e.preventDefault();
-      e.stopPropagation();
-      if (sameSite) {
-        location.href = `${API}/p/${CFG.canvasId}${href.pathname}${href.search}`;
-      } else {
-        window.open(href.href, "_blank");
-        toast("対象サイトの外側のリンクなので新しいタブで開きました");
+    // 相対リンク等で自オリジン宛になったもの: 通常はサーバー側中継(relayFallback)が
+    // /p/<id>/... へ誘導するのでそのまま通す。ただし別タブ意図の中クリックだけは、
+    // 既定だと生の自オリジンURLが新タブに開くのを避けるため明示的にプロキシURLを開く。
+    if (href.host === location.host) {
+      if (wantsNewTab && e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.open(`${API}/p/${CFG.canvasId}${href.pathname}${href.search}`, "_blank");
       }
-    },
-    true
-  );
+      return;
+    }
+
+    const sameSite = href.hostname === CFG.canvasHost;
+    e.preventDefault();
+    e.stopPropagation();
+    if (sameSite) {
+      const proxied = `${API}/p/${CFG.canvasId}${href.pathname}${href.search}`;
+      if (wantsNewTab) window.open(proxied, "_blank"); // 作業中タブは温存
+      else location.href = proxied;
+    } else {
+      window.open(href.href, "_blank");
+      toast("対象サイトの外側のリンクなので新しいタブで開きました");
+    }
+  }
+  // 中クリック(button===1)は click ではなく auxclick で拾う
+  document.addEventListener("click", handleLinkClick, true);
+  document.addEventListener("auxclick", (e) => { if (e.button === 1) handleLinkClick(e); }, true);
   // フォーム送信はサーバーのフォールバック中継がそのまま対象サイトへ届けるため、横取りしない
 
   // ---------- ツールバー操作 ----------
