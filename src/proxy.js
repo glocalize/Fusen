@@ -102,7 +102,11 @@ export function injectOverlay(html, { canvas, finalUrl, appOrigin, user, spa }) 
 <script nonce="${nonce}">window.__FUSEN__=${cfg};</script>
 <script nonce="${nonce}" src="${appOrigin}/fsn-assets/fusen-overlay.js" defer></script>`;
 
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, boot + "\n</body>");
+  // 最初ではなく「最後の </body>」に注入する。インラインJS(PDF出力等)が文字列内に
+  // </body> を含むと、最初マッチだとスクリプトの途中へ boot が割り込み、boot 内の
+  // </script> が実行中スクリプトを強制終了して以降が生テキスト化する(#12)。
+  const bodyIdx = html.toLowerCase().lastIndexOf("</body>");
+  if (bodyIdx >= 0) return html.slice(0, bodyIdx) + boot + "\n" + html.slice(bodyIdx);
   return html + boot;
 }
 
