@@ -82,6 +82,7 @@
   let filter = "open";
   let search = "";
   let currentPageOnly = false; // サイドバー: 既定は全ページ集約(他ページのコメントに気づきやすくするため)
+  let sortBy = "page"; // サイドバー並べ替え: "page"=ページ別グループ(既定) / "new"=新しい順(フラット) / "old"=古い順(フラット)
   let popEl = null;
   let popTrack = null; // 開いているポップオーバーの追従関数 () => {x,y,el}
   let tempPinEl = null;
@@ -159,6 +160,15 @@
           <button class="fsn-chip fsn-on" data-f="open">未解決</button>
           <button class="fsn-chip" data-f="resolved">解決済み</button>
         </div>
+        <label class="fsn-sort">並べ替え
+          <span class="fsn-sort-field">
+            <select id="fsn-sb-sort" aria-label="コメントの並べ替え">
+              <option value="page">ページ順</option>
+              <option value="new">新しい順</option>
+              <option value="old">古い順</option>
+            </select>
+          </span>
+        </label>
         <label class="fsn-sb-toggle"><input type="checkbox" id="fsn-sb-thispage"> このページのコメントだけ表示</label>
       </div>
       <div class="fsn-sb-list" id="fsn-sb-list"></div>
@@ -730,72 +740,96 @@
       return;
     }
 
-    // 見出しの件数バッジ用: 絞り込みに関係なくページごとの真の「未解決/全体(解決済み込み)」を集計
-    const pageTotals = new Map();
-    for (const c of rootsAllPages()) {
-      const k = normalize(c.page);
-      const t = pageTotals.get(k) || { open: 0, total: 0 };
-      t.total++;
-      if (c.status !== "resolved") t.open++;
-      pageTotals.set(k, t);
+    // 現在ページのピン番号(並べ替えに関係なく作成順=キャンバス上のピン番号)。
+    // id→番号を1回だけ引けるようにして、項目ごとの findIndex(O(n²))を避ける。
+    const pinNo = new Map(roots().map((c, i) => [c.id, i + 1]));
+
+    // 1件分のカード要素を生成(ページ別グループ表示・時間順フラット表示で共用)。
+    // showPage=true のときは項目にページ名を添える(フラット表示で「どのページか」を失わせない)。
+    function makeItem(c, isCurrent, showPage) {
+      const reps = repliesOf(c.id).length;
+      const num = isCurrent ? pinNo.get(c.id) || 0 : 0;
+      // 現在ページの項目は「今は非表示」タグを常に埋め込んでおき、fsn-is-hidden クラスの
+      // 付け外し(updatePositions が反応的に行う)で表示/非表示を切り替える。動的UI(モーダル等)
+      // 上のコメントは、対象が閉じている間だけこのタグが点灯して「動的UI上にある」と示す。
+      const subBits = [];
+      if (reps) subBits.push(`返信 ${reps}件`);
+      if (!isCurrent) subBits.push("クリックで開く");
+      const mine = c.author === CFG.user.name; // 削除は投稿者本人のみ(サーバー側でも #3 IDOR で制限)
+      const item = el(`
+        <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
+          <div class="fsn-row1">
+            <span class="fsn-sb-num">${num ? num : I("pin", 11, 2.6)}</span>
+            <strong style="font-size:12.5px">${esc(c.author)}</strong>
+            ${isCurrent ? `<span class="fsn-hidden-tag" title="この要素は今表示されていません。モーダルやタブを開くと表示されます">${I("eyeOff", 11, 2.4)} 今は非表示</span>` : ""}
+            <span class="fsn-sub">${timeAgo(c.created_at)}</span>
+            ${mine ? `<button class="fsn-sb-del" title="このコメントを削除" aria-label="このコメントを削除">${I("trash", 13, 2.4)}</button>` : ""}
+          </div>
+          <div class="fsn-prev">${esc(c.body)}</div>
+          ${showPage ? `<div class="fsn-sb-page ${isCurrent ? "fsn-sb-page-cur" : ""}" title="${esc(c.page)}">${I("home", 11)} ${esc(pageLabel(c.page))}${isCurrent ? " ・今見てるページ" : ""}</div>` : ""}
+          ${c.ctx_modal === true ? `<div class="fsn-sb-ctx">ダイアログ内${c.ctx_modal_label ? ": " + esc(c.ctx_modal_label) : ""}</div>` : ""}
+          <div class="fsn-sub">${subBits.join("  ·  ")}</div>
+        </div>`);
+      item.addEventListener("click", () => openFromSidebar(c));
+      const sbDel = item.querySelector(".fsn-sb-del");
+      if (sbDel) sbDel.addEventListener("click", (e) => { e.stopPropagation(); deleteComment(c.id); });
+      if (isCurrent) sbItemEls.set(c.id, item);
+      return item;
     }
 
-    // ページごとにグループ化(現在のページを先頭、以降は最初のコメント時刻順)
-    const groups = new Map();
-    for (const c of items) {
-      const key = normalize(c.page);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(c);
-    }
-    const keys = [...groups.keys()].sort((a, b) => {
-      if (a === PAGE) return -1;
-      if (b === PAGE) return 1;
-      return groups.get(a)[0].created_at.localeCompare(groups.get(b)[0].created_at);
-    });
-
-    const pageRoots = roots(); // 現在ページのピン番号に対応させる
     list.innerHTML = "";
-    for (const key of keys) {
-      const isCurrent = key === PAGE;
-      const arr = groups.get(key);
-      const tot = pageTotals.get(key) || { open: 0, total: arr.length };
-      list.appendChild(
-        el(`
-        <div class="fsn-pg-head ${isCurrent ? "fsn-pg-current" : ""}">
-          ${I("home", 12)} <span class="fsn-pg-name" title="${esc(arr[0].page)}">${esc(pageLabel(arr[0].page))}</span>
-          ${isCurrent ? '<span class="fsn-pg-tag">今見てるページ</span>' : ""}
-          <span class="fsn-pg-count" title="未解決 ${tot.open} / 全 ${tot.total}(解決済み含む)">${tot.open}/${tot.total}</span>
-        </div>`)
-      );
-      arr.forEach((c) => {
-        const reps = repliesOf(c.id).length;
-        const num = isCurrent ? pageRoots.findIndex((x) => x.id === c.id) + 1 : 0;
-        // 現在ページの項目は「今は非表示」タグを常に埋め込んでおき、fsn-is-hidden クラスの
-        // 付け外し(updatePositions が反応的に行う)で表示/非表示を切り替える。動的UI(モーダル等)
-        // 上のコメントは、対象が閉じている間だけこのタグが点灯して「動的UI上にある」と示す。
-        const subBits = [];
-        if (reps) subBits.push(`返信 ${reps}件`);
-        if (!isCurrent) subBits.push("クリックで開く");
-        const mine = c.author === CFG.user.name; // 削除は投稿者本人のみ(サーバー側でも #3 IDOR で制限)
-        const item = el(`
-          <div class="fsn-sb-item ${c.status === "resolved" ? "fsn-done" : ""} ${isCurrent ? "" : "fsn-other"}">
-            <div class="fsn-row1">
-              <span class="fsn-sb-num">${num ? num : I("pin", 11, 2.6)}</span>
-              <strong style="font-size:12.5px">${esc(c.author)}</strong>
-              ${isCurrent ? `<span class="fsn-hidden-tag" title="この要素は今表示されていません。モーダルやタブを開くと表示されます">${I("eyeOff", 11, 2.4)} 今は非表示</span>` : ""}
-              <span class="fsn-sub">${timeAgo(c.created_at)}</span>
-              ${mine ? `<button class="fsn-sb-del" title="このコメントを削除" aria-label="このコメントを削除">${I("trash", 13, 2.4)}</button>` : ""}
-            </div>
-            <div class="fsn-prev">${esc(c.body)}</div>
-            ${c.ctx_modal === true ? `<div class="fsn-sb-ctx">ダイアログ内${c.ctx_modal_label ? ": " + esc(c.ctx_modal_label) : ""}</div>` : ""}
-            <div class="fsn-sub">${subBits.join("  ·  ")}</div>
-          </div>`);
-        item.addEventListener("click", () => openFromSidebar(c));
-        const sbDel = item.querySelector(".fsn-sb-del");
-        if (sbDel) sbDel.addEventListener("click", (e) => { e.stopPropagation(); deleteComment(c.id); });
-        if (isCurrent) sbItemEls.set(c.id, item);
-        list.appendChild(item);
+    if (sortBy === "page") {
+      // 見出しの件数バッジ用: 絞り込みに関係なくページごとの真の「未解決/全体(解決済み込み)」を集計
+      const pageTotals = new Map();
+      for (const c of rootsAllPages()) {
+        const k = normalize(c.page);
+        const t = pageTotals.get(k) || { open: 0, total: 0 };
+        t.total++;
+        if (c.status !== "resolved") t.open++;
+        pageTotals.set(k, t);
+      }
+
+      // ページごとにグループ化(現在のページを先頭、以降は最初のコメント時刻順)
+      const groups = new Map();
+      for (const c of items) {
+        const key = normalize(c.page);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(c);
+      }
+      const keys = [...groups.keys()].sort((a, b) => {
+        if (a === PAGE) return -1;
+        if (b === PAGE) return 1;
+        return groups.get(a)[0].created_at.localeCompare(groups.get(b)[0].created_at);
       });
+
+      for (const key of keys) {
+        const isCurrent = key === PAGE;
+        const arr = groups.get(key);
+        const tot = pageTotals.get(key) || { open: 0, total: arr.length };
+        list.appendChild(
+          el(`
+          <div class="fsn-pg-head ${isCurrent ? "fsn-pg-current" : ""}">
+            ${I("home", 12)} <span class="fsn-pg-name" title="${esc(arr[0].page)}">${esc(pageLabel(arr[0].page))}</span>
+            ${isCurrent ? '<span class="fsn-pg-tag">今見てるページ</span>' : ""}
+            <span class="fsn-pg-count" title="未解決 ${tot.open} / 全 ${tot.total}(解決済み含む)">${tot.open}/${tot.total}</span>
+          </div>`)
+        );
+        arr.forEach((c) => list.appendChild(makeItem(c, isCurrent, false)));
+      }
+    } else {
+      // 時間順フラット表示: ページの枠を外し、全ページのコメントを作成時刻で一列に並べる。
+      // "new"=新しい順(降順) / "old"=古い順(昇順)。項目にページ名を添えて場所を失わせない
+      // (このページだけ表示のときは全て現在ページなので添えない)。
+      // created_at 同値のときは id を二次キーにして安定させる。全体を反転して "new" を
+      // "old" の完全な逆順にするので、同時刻の並びも両モードで一貫する。
+      const flat = [...items].sort((a, b) => {
+        const cmp = a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id);
+        return sortBy === "new" ? -cmp : cmp;
+      });
+      const showPage = !currentPageOnly;
+      for (const c of flat) {
+        list.appendChild(makeItem(c, normalize(c.page) === PAGE, showPage));
+      }
     }
     // 非表示インジケータの初期反映(フィルタ/検索など単独再描画からも即時に効かせる)
     queueUpdate();
@@ -1312,14 +1346,19 @@
   toolbar.querySelector("#fsn-mode-comment").addEventListener("click", () => setMode("comment"));
   toolbar.querySelector("#fsn-tb-comments").addEventListener("click", () => sidebar.classList.toggle("fsn-open"));
   sidebar.querySelector("#fsn-sb-close").addEventListener("click", () => sidebar.classList.remove("fsn-open"));
-  sidebar.querySelectorAll(".fsn-chip").forEach((ch) =>
+  sidebar.querySelectorAll(".fsn-chip[data-f]").forEach((ch) =>
     ch.addEventListener("click", () => {
-      sidebar.querySelectorAll(".fsn-chip").forEach((x) => x.classList.remove("fsn-on"));
+      // 同じグループ(絞り込みチップ)内だけで on を付け替える。並べ替えチップは別グループ
+      ch.parentElement.querySelectorAll(".fsn-chip").forEach((x) => x.classList.remove("fsn-on"));
       ch.classList.add("fsn-on");
       filter = ch.dataset.f;
       renderSidebar();
     })
   );
+  sidebar.querySelector("#fsn-sb-sort").addEventListener("change", (e) => {
+    sortBy = e.target.value;
+    renderSidebar();
+  });
   sidebar.querySelector("#fsn-sb-search").addEventListener("input", (e) => {
     search = e.target.value.trim();
     renderSidebar();
