@@ -303,11 +303,14 @@
 /* 時間順フラット表示で各カードに添えるページ名(どのページのコメントかを失わせない) */
 .fsn-sb-page {
   display: flex; align-items: center; gap: 4px;
-  font-size: 11px; font-weight: 700; color: #8a90a3;
+  /* 11px 通常テキスト。白背景で WCAG AA(4.5:1)を満たす濃さにする(#6a7185 ≈ 4.87:1) */
+  font-size: 11px; font-weight: 700; color: #6a7185;
   margin-top: 4px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.fsn-sb-page-cur { color: var(--fsn-orange); }
+/* 現在ページの強調色。ブランドの --fsn-orange(#ff6b35)は白背景で約2.8:1 と不足するため、
+   同系のより濃いオレンジ(#c2410c ≈ 5.18:1)で AA を満たす */
+.fsn-sb-page-cur { color: #c2410c; }
 .fsn-sb-list { flex: 1; overflow-y: auto; padding: 12px; }
 .fsn-sb-item {
   background: var(--fsn-white);

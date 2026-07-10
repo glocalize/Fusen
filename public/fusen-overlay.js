@@ -740,13 +740,15 @@
       return;
     }
 
-    const pageRoots = roots(); // 現在ページのピン番号に対応させる(並べ替えに関係なく作成順=キャンバス上のピン番号)
+    // 現在ページのピン番号(並べ替えに関係なく作成順=キャンバス上のピン番号)。
+    // id→番号を1回だけ引けるようにして、項目ごとの findIndex(O(n²))を避ける。
+    const pinNo = new Map(roots().map((c, i) => [c.id, i + 1]));
 
     // 1件分のカード要素を生成(ページ別グループ表示・時間順フラット表示で共用)。
     // showPage=true のときは項目にページ名を添える(フラット表示で「どのページか」を失わせない)。
     function makeItem(c, isCurrent, showPage) {
       const reps = repliesOf(c.id).length;
-      const num = isCurrent ? pageRoots.findIndex((x) => x.id === c.id) + 1 : 0;
+      const num = isCurrent ? pinNo.get(c.id) || 0 : 0;
       // 現在ページの項目は「今は非表示」タグを常に埋め込んでおき、fsn-is-hidden クラスの
       // 付け外し(updatePositions が反応的に行う)で表示/非表示を切り替える。動的UI(モーダル等)
       // 上のコメントは、対象が閉じている間だけこのタグが点灯して「動的UI上にある」と示す。
@@ -818,8 +820,10 @@
       // 時間順フラット表示: ページの枠を外し、全ページのコメントを作成時刻で一列に並べる。
       // "new"=新しい順(降順) / "old"=古い順(昇順)。項目にページ名を添えて場所を失わせない
       // (このページだけ表示のときは全て現在ページなので添えない)。
+      // created_at 同値のときは id を二次キーにして安定させる。全体を反転して "new" を
+      // "old" の完全な逆順にするので、同時刻の並びも両モードで一貫する。
       const flat = [...items].sort((a, b) => {
-        const cmp = a.created_at.localeCompare(b.created_at);
+        const cmp = a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id);
         return sortBy === "new" ? -cmp : cmp;
       });
       const showPage = !currentPageOnly;
