@@ -211,6 +211,29 @@ console.log("[I4] プロキシ短期堅牢化(CSP nonce)");
   ok(outDq.includes("&quot;"), "CSP値の\" は &quot; にエスケープされる");
 }
 
+console.log("[manifest] Cloudflare Access 下での PWA manifest crossorigin 付与");
+{
+  const io = { canvas: { id: "c1", title: "T", host: "example.com" }, finalUrl: "https://example.com/", appOrigin: "https://app.example", user: { name: "u" }, spa: false };
+  // crossorigin 無しの manifest link に use-credentials を付与(Access のログイン302→CORS失敗を防ぐ)
+  const out1 = injectOverlay('<html><head><link rel="manifest" href="/site.webmanifest"></head><body></body></html>', io);
+  ok(/<link[^>]*rel=["']?manifest[\s\S]*?crossorigin="use-credentials"|crossorigin="use-credentials"[\s\S]*?rel=["']?manifest/i.test(out1), "manifest link に crossorigin=use-credentials を付与");
+  // 既存 crossorigin(anonymous 等)は use-credentials へ置換し重複させない
+  const out2 = injectOverlay('<html><head><link rel="manifest" crossorigin="anonymous" href="/m.webmanifest"></head><body></body></html>', io);
+  ok((out2.match(/crossorigin=/gi) || []).length === 1 && /crossorigin="use-credentials"/i.test(out2) && !/anonymous/i.test(out2), "既存 crossorigin は use-credentials に置換され重複しない");
+  // manifest 以外の link(stylesheet 等)には crossorigin を付けない
+  const out3 = injectOverlay('<html><head><link rel="stylesheet" href="/a.css"></head><body></body></html>', io);
+  ok(!/crossorigin/i.test(out3), "manifest 以外の link には crossorigin を付けない");
+  // 別オリジンの絶対URL manifest は触らない(credentialed CORS の強制は ACAO:* を逆に壊す)
+  const out4 = injectOverlay('<html><head><link rel="manifest" href="https://cdn.example/m.webmanifest"></head><body></body></html>', io);
+  ok(!/crossorigin/i.test(out4), "絶対URLの manifest には crossorigin を付けない");
+  // スキーム相対(//host/...)も別オリジンになり得るため触らない
+  const out5 = injectOverlay('<html><head><link rel="manifest" href="//cdn.example/m.webmanifest"></head><body></body></html>', io);
+  ok(!/crossorigin/i.test(out5), "スキーム相対URLの manifest には crossorigin を付けない");
+  // 相対パス(assets/m.webmanifest)は同一オリジン解決なので付与する
+  const out6 = injectOverlay('<html><head><link rel="manifest" href="assets/m.webmanifest"></head><body></body></html>', io);
+  ok(/crossorigin="use-credentials"/i.test(out6), "相対パスの manifest には crossorigin を付与する");
+}
+
 console.log("[I5] オープンリダイレクト対策(login.htmlのnext)");
 {
   const html = readFileSync(here("../public/login.html"), "utf8");

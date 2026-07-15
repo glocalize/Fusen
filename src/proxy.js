@@ -74,6 +74,20 @@ export function injectOverlay(html, { canvas, finalUrl, appOrigin, user, spa }) 
     return tag.replace(/content=(["'])[\s\S]*?\1/i, `content="${escAttr(augmentCsp(m[2], appOrigin, nonce))}"`);
   });
 
+  // PWA manifest はブラウザがデフォルトで credential 無しに取得するため、Cloudflare Access
+  // 等の認証境界の内側だと manifest 取得がログインへ 302 され CORS で失敗する(サイト機能
+  // 自体には無害だがコンソールにエラーが出続ける)。オーバーレイ配信は対象をアプリ自身の
+  // オリジンで返すので、クッキーを載せて取得できるよう crossorigin="use-credentials" を強制する。
+  // ただし対象は「アプリ自身のオリジンに解決される相対/ルート絶対の href」のみ。別オリジンの
+  // 絶対URL(CDN等)に credentialed CORS を強制すると ACAO:* で動いていたものが逆に壊れる。
+  html = html.replace(/<link\b[^>]*\brel=(["']?)manifest\1[^>]*>/gi, (tag) => {
+    const href = (tag.match(/\bhref=("([^"]*)"|'([^']*)'|([^\s>]+))/i) || [])[1] || "";
+    const hrefVal = href.replace(/^["']|["']$/g, "");
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(hrefVal)) return tag; // 絶対URL・スキーム相対は触らない
+    const cleaned = tag.replace(/\s+crossorigin(=("[^"]*"|'[^']*'|[^\s>]+))?/gi, "");
+    return cleaned.replace(/<link\b/i, '<link crossorigin="use-credentials"');
+  });
+
   // SPAモード: /p/<id> プレフィックスをアプリから隠し、ルーターに「ルートにいる」と思わせる。
   // <head>の先頭に注入してアプリのJSより先に実行させる。対象ホストのみ(他サイトには影響させない)。
   if (spa) {
@@ -204,9 +218,36 @@ export async function proxyPath(c) {
   const ctype = upstream.headers.get("content-type") || "";
   const isHtml = ctype.includes("text/html");
 
-  // ページ表示(GET html)のみ: ブロック検知とリダイレクト先の検証
+  // ページ表示(GET html)のみ: ブロック検知とリダイレクト先の検証。
+  // サブリソース(script/style/画像/fetch 等)が同様にブロック/別ホストの認証ページへ
+  // 落ちた場合、ログイン/エラーHTMLを resource 本体として黙って返すと <script> 等が HTML を
+  // 実行しようとして壊れ、原因の分かりにくいサイレント失敗になる(例: 対象サイトが Cloudflare
+  // Access 配下だと assets/*.js がログインへ 302 → HTML が返り関数未定義)。文書ナビゲーション
+  // 以外は明示的な 502 にして、Network タブで失敗を可視化する。
   if (isHtml && method === "GET") {
-    if ([401, 403, 406, 429, 503].includes(upstream.status)) {
+    const dest = (c.req.header("sec-fetch-dest") || "").toLowerCase();
+    // iframe/frame 内ナビゲーションは「人が見る文書」なのでエラーページ側に倒す。
+    // ヘッダ未送信("" = Sec-Fetch-Dest 非対応ブラウザ)も従来挙動(文書扱い)を維持する。
+    const isSubresource = !["", "document", "iframe", "frame", "fencedframe"].includes(dest);
+    const blocked = [401, 403, 406, 429, 503].includes(upstream.status);
+    let finalHost = "";
+    let offHost = false;
+    try {
+      const fu = new URL(finalUrl);
+      finalHost = fu.hostname;
+      offHost = !isAllowed(fu, canvas.host);
+    } catch {}
+
+    if ((blocked || offHost) && isSubresource) {
+      return c.text(
+        offHost
+          ? "対象サイトがアプリ外(認証ページ等)へリダイレクトしたため、このリソースは取得できません。"
+          : `対象サイトがこのリソースへのアクセスを拒否しました(HTTP ${upstream.status})。`,
+        502,
+        { "Cache-Control": "no-store" }
+      );
+    }
+    if (blocked) {
       return c.html(
         errorPage(
           "このサイトはレビュー表示できません",
@@ -218,18 +259,16 @@ export async function proxyPath(c) {
         200
       );
     }
-    try {
-      if (!isAllowed(new URL(finalUrl), canvas.host)) {
-        return c.html(
-          errorPage(
-            "別のドメインへリダイレクトされました",
-            new URL(finalUrl).hostname,
-            "対象サイトが認証ページ等へリダイレクトしています。ログイン保護(Cloudflare Access等)が掛かっている場合は、保護を外すかバイパス設定をしてください。"
-          ),
-          200
-        );
-      }
-    } catch {}
+    if (offHost) {
+      return c.html(
+        errorPage(
+          "別のドメインへリダイレクトされました",
+          finalHost,
+          "対象サイトが認証ページ等へリダイレクトしています。ログイン保護(Cloudflare Access等)が掛かっている場合は、保護を外すかバイパス設定をしてください。"
+        ),
+        200
+      );
+    }
   }
 
   const headers = new Headers();
