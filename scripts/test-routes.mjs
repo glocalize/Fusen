@@ -52,7 +52,7 @@ const ASSETS = {
 // 上流サイトのモック(check-url / proxy / relay 用)。常に HTML 200。受け取った headers を記録。
 let lastFetch = null;
 globalThis.fetch = async (url, init) => {
-  lastFetch = { url: String(url), headers: (init && init.headers) || {} };
+  lastFetch = { url: String(url), headers: (init && init.headers) || {}, cache: init && init.cache };
   return new Response("<html><head></head><body><h1>Hello</h1></body></html>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 };
 
@@ -259,6 +259,7 @@ const html = await r.text();
 assert(r.status === 200 && html.includes("__FUSEN__") && html.includes("fusen-overlay.js"), "プロキシHTMLにオーバーレイ注入");
 assert((r.headers.get("set-cookie") || "").includes(`fsn_canvas=${cid}`), "fsn_canvas クッキー付与");
 assert(lastFetch && lastFetch.headers.authorization === "Basic " + btoa("revuser:revpass"), "Basic認証ヘッダが対象ホスト(example.com)へ付与される");
+assert(lastFetch && lastFetch.cache === "no-store", "プロキシの上流fetchはエッジキャッシュをバイパス(cache: no-store)");
 assert(html.includes("history.replaceState(history.state"), "SPAモード: 対象ホストのHTMLにルーティングshimが注入される");
 
 // 16b) サブリソースが認証/ブロックで HTML に化けた場合、HTMLを本体として黙って返さず 502 にする。
@@ -320,6 +321,10 @@ assert(r.status === 302 && r.headers.get("location") === `/p/${cid}`, "/s/:token
 // 18) フォールバック中継: ルート絶対パスのHTML GET → /p/:id へ(fsn_canvas 利用)
 r = await req("/some/app/route", { headers: { Cookie: `${cookie}; fsn_canvas=${cid}`, accept: "text/html" } });
 assert(r.status === 302 && (r.headers.get("location") || "") === `/p/${cid}/some/app/route`, "中継: HTML GET はプロキシ表示へ");
+
+// 18b) 中継の上流fetchもエッジキャッシュをバイパスする(旧アセット配信防止)
+r = await req("/assets/x.js", { headers: { Cookie: `${cookie}; fsn_canvas=${cid}` } });
+assert(lastFetch && lastFetch.url === "https://example.com/assets/x.js" && lastFetch.cache === "no-store", "中継: 上流fetchも cache: no-store");
 
 // Basic認証ヘルパー単体
 assert(basicAuthHeader({ PROXY_BASIC_AUTH: "u:p", PROXY_BASIC_AUTH_HOSTS: "example.com" }, "example.com") === "Basic " + btoa("u:p"), "basicAuthHeader: 対象ホストは付与");
