@@ -200,7 +200,11 @@ export async function proxyPath(c) {
     if (ct) headers["content-type"] = ct;
     const ba = basicAuthHeader(c.env, target.hostname);
     if (ba) headers["authorization"] = ba;
-    const init = { method, headers, signal: AbortSignal.timeout(20000) };
+    // cache: "no-store" — Worker のサブリクエストはデフォルトで Cloudflare エッジキャッシュを
+    // 経由するため、対象サイトの再デプロイ後もバージョンクエリの無いアセット(JS等)の旧版が
+    // 配信され続ける(sd-reqseed.js が古いまま → 関数未定義でカレンダー空、の実事例)。
+    // レビューツールは常に最新の対象を見せるべきなので、鮮度をキャッシュ効率より優先する。
+    const init = { method, headers, cache: "no-store", signal: AbortSignal.timeout(20000) };
     if (!["GET", "HEAD"].includes(method)) {
       if (Number(c.req.header("content-length") || 0) > (Number(c.env.MAX_RELAY_BODY) || MAX_RELAY_BODY)) return c.text("リクエストボディが大きすぎます", 413);
       init.body = await c.req.raw.arrayBuffer();
@@ -326,7 +330,8 @@ export async function relayFallback(c) {
     headers["sec-fetch-site"] = "same-origin";
     const ba = basicAuthHeader(c.env, target.hostname);
     if (ba) headers["authorization"] = ba;
-    const init = { method: c.req.method, headers, signal: AbortSignal.timeout(20000) };
+    // proxyPath と同じ理由でエッジキャッシュをバイパスする(旧アセット配信防止)
+    const init = { method: c.req.method, headers, cache: "no-store", signal: AbortSignal.timeout(20000) };
     if (!["GET", "HEAD"].includes(c.req.method)) {
       if (Number(c.req.header("content-length") || 0) > (Number(c.env.MAX_RELAY_BODY) || MAX_RELAY_BODY)) return c.text("リクエストボディが大きすぎます", 413);
       init.body = await c.req.raw.arrayBuffer();
