@@ -261,6 +261,26 @@ assert((r.headers.get("set-cookie") || "").includes(`fsn_canvas=${cid}`), "fsn_c
 assert(lastFetch && lastFetch.headers.authorization === "Basic " + btoa("revuser:revpass"), "Basic認証ヘッダが対象ホスト(example.com)へ付与される");
 assert(html.includes("history.replaceState(history.state"), "SPAモード: 対象ホストのHTMLにルーティングshimが注入される");
 
+// 16b) サブリソースが認証/ブロックで HTML に化けた場合、HTMLを本体として黙って返さず 502 にする。
+// (対象サイトが Cloudflare Access 配下で assets/*.js がログインへ 302 → HTML が返る状況の再現)
+{
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<html><body>Access login</body></html>", { status: 403, headers: { "content-type": "text/html; charset=utf-8" } });
+
+  // サブリソース(script): 502 + 非HTML。<script> が HTML を実行して壊れる(sdSelfOps 未定義等)のを防ぐ
+  const sr = await req(`/p/${cid}/assets/app.js`, { headers: { Cookie: cookie, "sec-fetch-dest": "script" } });
+  const srBody = await sr.text();
+  assert(sr.status === 502, `サブリソースのブロック/認証HTMLは 502 (got ${sr.status})`);
+  assert(!/<html/i.test(srBody) && !srBody.includes("__FUSEN__"), "サブリソース失敗時はログイン/エラーHTMLを本体として返さない");
+
+  // 文書ナビゲーションは従来どおり 200 のエラーページHTMLを維持
+  const doc = await req(`/p/${cid}/blocked-page`, { headers: { Cookie: cookie, "sec-fetch-dest": "document", accept: "text/html" } });
+  const docBody = await doc.text();
+  assert(doc.status === 200 && /<html/i.test(docBody), "文書ナビゲーションのブロック時は従来どおり 200 のエラーページを表示");
+
+  globalThis.fetch = savedFetch;
+}
+
 // 17) /c/:id, /s/:token
 r = await req(`/c/${cid}`, auth());
 assert(r.status === 302 && r.headers.get("location") === `/p/${cid}`, "/c/:id → /p/:id");
