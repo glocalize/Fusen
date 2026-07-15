@@ -223,6 +223,15 @@ console.log("[manifest] Cloudflare Access 下での PWA manifest crossorigin 付
   // manifest 以外の link(stylesheet 等)には crossorigin を付けない
   const out3 = injectOverlay('<html><head><link rel="stylesheet" href="/a.css"></head><body></body></html>', io);
   ok(!/crossorigin/i.test(out3), "manifest 以外の link には crossorigin を付けない");
+  // 別オリジンの絶対URL manifest は触らない(credentialed CORS の強制は ACAO:* を逆に壊す)
+  const out4 = injectOverlay('<html><head><link rel="manifest" href="https://cdn.example/m.webmanifest"></head><body></body></html>', io);
+  ok(!/crossorigin/i.test(out4), "絶対URLの manifest には crossorigin を付けない");
+  // スキーム相対(//host/...)も別オリジンになり得るため触らない
+  const out5 = injectOverlay('<html><head><link rel="manifest" href="//cdn.example/m.webmanifest"></head><body></body></html>', io);
+  ok(!/crossorigin/i.test(out5), "スキーム相対URLの manifest には crossorigin を付けない");
+  // 相対パス(assets/m.webmanifest)は同一オリジン解決なので付与する
+  const out6 = injectOverlay('<html><head><link rel="manifest" href="assets/m.webmanifest"></head><body></body></html>', io);
+  ok(/crossorigin="use-credentials"/i.test(out6), "相対パスの manifest には crossorigin を付与する");
 }
 
 console.log("[I5] オープンリダイレクト対策(login.htmlのnext)");
