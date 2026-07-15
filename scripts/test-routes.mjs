@@ -265,20 +265,50 @@ assert(html.includes("history.replaceState(history.state"), "SPAモード: 対�
 // (対象サイトが Cloudflare Access 配下で assets/*.js がログインへ 302 → HTML が返る状況の再現)
 {
   const savedFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response("<html><body>Access login</body></html>", { status: 403, headers: { "content-type": "text/html; charset=utf-8" } });
+  try {
+    globalThis.fetch = async () => new Response("<html><body>Access login</body></html>", { status: 403, headers: { "content-type": "text/html; charset=utf-8" } });
 
-  // サブリソース(script): 502 + 非HTML。<script> が HTML を実行して壊れる(sdSelfOps 未定義等)のを防ぐ
-  const sr = await req(`/p/${cid}/assets/app.js`, { headers: { Cookie: cookie, "sec-fetch-dest": "script" } });
-  const srBody = await sr.text();
-  assert(sr.status === 502, `サブリソースのブロック/認証HTMLは 502 (got ${sr.status})`);
-  assert(!/<html/i.test(srBody) && !srBody.includes("__FUSEN__"), "サブリソース失敗時はログイン/エラーHTMLを本体として返さない");
+    // サブリソース(script): 502 + 非HTML。<script> が HTML を実行して壊れる(sdSelfOps 未定義等)のを防ぐ
+    const sr = await req(`/p/${cid}/assets/app.js`, { headers: { Cookie: cookie, "sec-fetch-dest": "script" } });
+    const srBody = await sr.text();
+    assert(sr.status === 502, `サブリソースのブロック/認証HTMLは 502 (got ${sr.status})`);
+    assert(!/<html/i.test(srBody) && !srBody.includes("__FUSEN__"), "サブリソース失敗時はログイン/エラーHTMLを本体として返さない");
+    assert((sr.headers.get("cache-control") || "").includes("no-store"), "サブリソース失敗の 502 は no-store");
 
-  // 文書ナビゲーションは従来どおり 200 のエラーページHTMLを維持
-  const doc = await req(`/p/${cid}/blocked-page`, { headers: { Cookie: cookie, "sec-fetch-dest": "document", accept: "text/html" } });
-  const docBody = await doc.text();
-  assert(doc.status === 200 && /<html/i.test(docBody), "文書ナビゲーションのブロック時は従来どおり 200 のエラーページを表示");
+    // 文書ナビゲーションは従来どおり 200 のエラーページHTMLを維持
+    const doc = await req(`/p/${cid}/blocked-page`, { headers: { Cookie: cookie, "sec-fetch-dest": "document", accept: "text/html" } });
+    const docBody = await doc.text();
+    assert(doc.status === 200 && /<html/i.test(docBody), "文書ナビゲーションのブロック時は従来どおり 200 のエラーページを表示");
 
-  globalThis.fetch = savedFetch;
+    // iframe 内ナビゲーションは「人が見る文書」なので 502 text でなくエラーページを表示
+    const ifr = await req(`/p/${cid}/embed-page`, { headers: { Cookie: cookie, "sec-fetch-dest": "iframe", accept: "text/html" } });
+    const ifrBody = await ifr.text();
+    assert(ifr.status === 200 && /<html/i.test(ifrBody), "iframe ナビゲーションのブロック時もエラーページを表示(502にしない)");
+
+    // 本命シナリオ: 302 → 別ホスト(*.cloudflareaccess.com)の認証ページ 200 HTML。
+    // safeFetch が手動追従した最終 URL が対象ホスト外になるため、サブリソースは 502 にする。
+    let hop = 0;
+    globalThis.fetch = async () => {
+      hop++;
+      if (hop === 1) return new Response(null, { status: 302, headers: { location: "https://myteam.cloudflareaccess.com/cdn-cgi/access/login/example.com" } });
+      const res = new Response("<html><body>Sign in</body></html>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      // 実 fetch と同様に最終ホップの URL を持たせる(proxyPath は upstream.url で offHost 判定する)
+      Object.defineProperty(res, "url", { value: "https://myteam.cloudflareaccess.com/cdn-cgi/access/login/example.com" });
+      return res;
+    };
+    const off = await req(`/p/${cid}/assets/sd-reqseed.js`, { headers: { Cookie: cookie, "sec-fetch-dest": "script" } });
+    const offBody = await off.text();
+    assert(off.status === 502, `別ホスト認証ページへ落ちたサブリソースは 502 (got ${off.status})`);
+    assert(!/<html/i.test(offBody), "別ホスト認証ページのHTMLを本体として返さない");
+
+    // 同条件でも文書ナビゲーションは従来どおり 200 の「別ドメインへリダイレクト」エラーページ
+    hop = 0;
+    const offDoc = await req(`/p/${cid}/some-page`, { headers: { Cookie: cookie, "sec-fetch-dest": "document", accept: "text/html" } });
+    const offDocBody = await offDoc.text();
+    assert(offDoc.status === 200 && offDocBody.includes("別のドメインへリダイレクトされました"), "別ホスト認証ページへの文書ナビゲーションは従来どおり 200 エラーページ");
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
 }
 
 // 17) /c/:id, /s/:token
