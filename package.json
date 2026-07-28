@@ -19,11 +19,12 @@
     "cf:migrate:remote": "wrangler d1 migrations apply fusen-db --remote",
     "cf:seed:local": "wrangler d1 execute fusen-db --local --file=seed.sql",
     "cf:seed:remote": "wrangler d1 execute fusen-db --remote --file=seed.sql",
-    "test": "npm run test:d1 && npm run test:routes && npm run test:security && npm run test:issue",
+    "test": "npm run test:d1 && npm run test:routes && npm run test:security && npm run test:issue && npm run test:csv",
     "test:d1": "node --experimental-sqlite scripts/test-d1.mjs",
     "test:routes": "node --experimental-sqlite scripts/test-routes.mjs",
     "test:security": "node --experimental-sqlite scripts/test-security.mjs",
     "test:issue": "node scripts/test-issue-format.mjs",
+    "test:csv": "node scripts/test-csv-format.mjs",
     "test:anchor": "node scripts/test-anchor.mjs"
   },
   "dependencies": {
