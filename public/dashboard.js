@@ -70,6 +70,7 @@ async function load() {
       </div>
       <div class="actions">
         <button class="icon-btn act-share" title="共有リンクをコピー">${fsnIcon("link", 15)}</button>
+        <button class="icon-btn act-export" title="コメントをCSVでダウンロード">${fsnIcon("download", 15)}</button>
         <button class="icon-btn act-archive" title="${tab === "archived" ? "戻す" : "アーカイブ"}">${tab === "archived" ? fsnIcon("undo", 15) : fsnIcon("archive", 15)}</button>
       </div>
     </div>`
@@ -87,6 +88,21 @@ async function load() {
       const d = await r.json();
       await navigator.clipboard.writeText(d.share_url);
       toast("共有リンクをコピーしました(ログイン不要でコメントできます)");
+    });
+    card.querySelector(".act-export").addEventListener("click", async () => {
+      const canvas = canvases.find((x) => x.id === id);
+      const r = await fetch(`/api/canvases/${id}/comments`);
+      const d = await r.json();
+      if (!r.ok) return toast(d.error || "コメントを取得できませんでした");
+      if (!d.comments.length) return toast("コメントがまだありません");
+      // CSV生成はクライアント完結(public/csv-format.js)。Blob でダウンロードさせる
+      const blob = new Blob([FsnCsvFormat.buildCommentsCsv(d.comments)], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = FsnCsvFormat.buildCsvFilename(canvas?.title, new Date());
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast("コメントをCSVでダウンロードしました");
     });
     card.querySelector(".act-archive").addEventListener("click", async () => {
       await fetch(`/api/canvases/${id}`, {
