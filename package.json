@@ -28,9 +28,9 @@
     "test:anchor": "node scripts/test-anchor.mjs"
   },
   "dependencies": {
-    "hono": "^4.6.0"
+    "hono": "^4.13.5"
   },
   "devDependencies": {
-    "wrangler": "^4.103.0"
+    "wrangler": "^4.126.0"
   }
 }
